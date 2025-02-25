@@ -1,0 +1,1317 @@
+---
+title: "PROJET 1 : Caractéristiques des rendements logarithmiques des actions"
+author: "Alexandra"
+date: "2024-11-16"
+output: 
+  rmdformats::readthedown
+---
+
+Ce document RMarkdown a pour objectif d'apporter une explication approfondie des raisonnements et des interprétations réalisés dans le cadre de l'étude des caractéristiques des rendements logarithmiques des actions, en se concentrant particulièrement sur les séries temporelles `rte` et `rtt`.
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(xts)
+library(forecast)
+library(moments)
+library(yfR)
+library(scales)
+library(FinTS)
+library(fGarch)
+library(TSA)
+library(lmtest)
+library(tseries)
+library(urca)
+library(CADFtest)
+library(knitr)
+```
+
+```{r, include = FALSE}
+my_ticker <- 'SQNXF'      
+first_date <- "2013-01-01"  
+last_date <-"2024-10-16"   
+
+# fetch data
+df_yf <- yf_get(tickers = my_ticker, 
+                first_date = first_date,
+                last_date = last_date,
+                freq_data='daily',type_return='log')
+
+pt<-df_yf$price_adjusted
+dpt=diff(pt)
+datesp<-df_yf$ref_date
+dates<-datesp[-1]
+rt=df_yf$ret_adjusted_prices[-1]
+N<-length(rt)
+rte<-rt[1:1761] # dates[1762] = "2020-01-02"
+T<-length(rte)
+rtt<-rt[1762:N]
+T2<-length(rtt)
+```
+
+```{r, echo=FALSE}
+datesp<-df_yf$ref_date
+first_day_of_year = NULL
+for (i in 1:12) {
+  first_day_of_year[i] = as.character(datesp[format(datesp, "%Y") == 2012+i][1])
+}
+
+plot(datesp, pt, type='l', ylab="Cours de Square Enix (€)", xlab="Temps", cex.main=1.5, main="Evolution du cours de l'action Square Enix", xaxt = "n")
+
+axis(side = 1, at=as.Date(first_day_of_year), labels=format(as.Date(first_day_of_year), "%Y"))
+
+fit0 = lm(pt ~ datesp)
+abline(fit0, col="red")
+
+
+op<-par(mfrow=c(3,1))
+plot(datesp,pt,type='l',ylab="indice SQNXF",col=3)
+plot(dates,dpt,type='l',col=2,ylab="variations de SQNXF")
+plot(dates,rt,type='l',col=1,ylab="rendement de SQNXF")
+```
+
+- Le premier graphique, montre que la série de l’action SQNXF a une tendance croissante ;
+
+- Les deux autres graphiques, montrent que ses variations et son rendement logarithmique fluctuent autour de 0 ;
+
+- De plus, pour dpt les fluctuations autour de 0 augmentent dans le temps, il semble y avoir plusieurs clusters de volatilité de 2020 à 2021 ainsi qu’en 2014.
+
+
+# Étude des 8 caractéristiques la série rte
+
+Voici le chronogramme de la série `rte` : 
+
+```{r, echo=FALSE}
+# Supposons que rte soit déjà au format série temporelle
+plot(rte, main = "Chronogramme de la série rte", xlab = "Temps", ylab = "Rendements", col = "#A4163E", type = "l")
+```
+
+La série `rte` n'a visuellement pas l'air d'avoir de tendance, elle fluctue autour de 0. De plus, la variance ne semble pas non plus varier au cours du temps, mis à part le pic se situant aux alentours de la position 250 (sans doute présence d'hétéroscédasticité).
+
+## Propriété 1 : Asymétrie perte / gain
+
+### Hypothèses
+
+$H_0 : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^3\right] = 0 \quad VS \quad H_a : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^3\right] \neq 0$
+
+### Cas pratique
+
+```{r, echo=FALSE}
+agostino.test(rte)
+```
+
+Le coefficient du skewness est significatif puisque la p-value étant `< 2.2e-16` est inférieur 0.05 on rejette donc H0. Alors nous pouvons interpréter sa valeur calculée. La skewness est supérieur à 0, donc **la probabilité de gains est inférieur à la probabilité de pertes**.
+
+## Propriété 2 : Queues de distribution épaisses
+
+### Hypothèses
+
+$H_0 : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^4\right] = 3 \quad VS \quad H_a : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^4\right] \neq 3$
+
+### Cas pratique
+
+```{r, echo=FALSE}
+anscombe.test(rte)
+```
+
+La p-value du test d’Anscombe étant `< 2.2e-16` est inférieur  à 0.05 on rejette H0, ce qui indique que le kurtosis est significatif. Celui-ci vaut `38` ce qui est supérieur à 3 la distribution est donc **leptokurtique**. Ainsi, **les queues de distribution sont plus épaisses que celles d’une loi normale centrée réduite**.
+
+## Propriété 3 : Autocorrélations des carrés des rendements fortes et faibles pour les rendements
+
+### Réalisation de l'ACF et de la PACF
+
+```{r, echo=FALSE}
+op<-par(mfrow=c(2,2))
+Acf(rte,main="ACF du rendement logarithmique") 
+Pacf(rte,main="PACF du rendement logarithmique") 
+Acf(rte^2,main="ACF du rendement logarithmique au carré") 
+Pacf(rte^2,main="PACF du rendement logarithmique au carré")
+```
+
+Lorsque nous observons l'ACF et la PACF de notre série `rte` comme convenu une faible autocorrélation à l'ordre 7 dans les rendements, avec une valeur d’autocorrélation d'à peu près 0,055.
+
+Pour la série associée aux carrées des rendements, l’ACF et le PACF montre une forte autocorrélation à l'ordre 1 (de 0.23) mais aussi des faibles autocorrélation aux ordres 7 et 32, avec des valeurs respectives d'à peu près 0.055 et 0.06.
+
+### Réalisation de la statistique de Ljung-Box
+
+#### Hypothèses
+
+$H0 ∶ \rho(k) = 0$ pour k = 1 jusqu’à K $\quad VS \quad H_a : \rho(k) \neq 0$ pour au moins une valeur de k comprise entre 1 et K
+
+#### Cas pratique
+
+##### • Autocorrélations des carrés des rendements rte^2
+
+```{r, echo=FALSE}
+pvaluesrt =rep(0,20)
+pvaluesrt2 =rep(0,20)
+for (i in 1:25 ) {
+  pvaluesrt[i] = Box.test(rte,lag=i,type="Ljung-Box")$p.value
+  pvaluesrt2[i] = Box.test(rte^2,lag=i,type="Ljung-Box")$p.value
+}
+
+pvaluesrt2
+```
+
+Toutes les p-values sont inférieures à 0.05 et pour certaines quasiment nulle pour la série `rte^2`. On rejette donc H0 et on conclut à la **présence d’autocorrélation dans 
+les rendements au carré**.
+
+##### • Autocorrélations des rendements rte
+
+```{r, echo=FALSE}
+pvaluesrt
+```
+
+Toutes les p-values sont supérieurs à 0.05 pour `rte`. On accepte donc H0 et on conclut qu'**il n'y a pas d'autocorrélation dans les rendements**.
+
+Nous n'avons donc pas besoin de modéliser cette caractéristique en utilisant un modèle ARMA(p,q).
+
+## Propriété 4 : Clusters de volatilité
+
+### Hypothèses
+
+$H0 ∶ \alpha1 = \alpha2 = ... = \alpha m = 0$ donc homoscédasticité conditionnelle 
+
+$VS$
+
+$Ha ∶ \alpha i \neq 0$ avec $i \neq 0$ donc hétéroscédasticité conditionnelle.
+
+**_RAPPEL :_** Une serie hétéroscédastique dont la variabilité change au cours du temps de façon non évidente.
+
+### Cas pratique
+
+```{r, echo=FALSE}
+LM1<-ArchTest(as.numeric(rte),lag=1)
+LM1
+```
+
+La p-value est `< 2.2e-16` ce qui est inférieur à 0.05, on rejette donc H0 et donc il y a présence de clusters de volatilité à l’ordre 1 dans `rte`. 
+
+```{r, echo=FALSE}
+LM2<-ArchTest(as.numeric(rte),lag=2)
+LM2
+```
+
+La p-value `< 2.2e-16` ce qui est inférieur à 0.05, on rejette donc H0 et donc il y a présence de clusters de volatilité à l’ordre 2 dans `rte`.
+
+```{r, echo=FALSE}
+LM20<-ArchTest(as.numeric(rte),lag=20)
+LM20
+```
+
+La p-value est de `4.953e-14` ce qui est inférieur à 0.05, on rejette donc H0. Il y a présence de clusters de volatilité à l'ordre 20 dans `rte`.
+
+```{r, echo=FALSE}
+LM30<-ArchTest(as.numeric(rte),lag=30)
+LM30
+```
+
+Même conclusion à l'ordre 30. Les p-values sont donc toutes inférieures à 0.05. On rejette alors l'hypothèse nulle,  d’homoscédasticité conditionnelle. **Il y a donc des clusters de volatilité dans la série `rte`**.
+
+## Propriété 5 : Queues épaisses conditionnelles
+
+Le but de cette propriété est de modéliser les clusters de volatilité de notre série, pour cela, nous estimons un modèle GARCH(1,1) sur notre série `rte` normalisée.
+
+```{r, echo=FALSE}
+rte_centre = (rte-mean(rte))/sd(rte)
+volat<-garch(rte_centre,order=c(1,1))
+```
+
+En procédant de cette manière, nous obtenons l'information `FALSE CONVERGENCE`. Pour remédier à cela, nous utilisons la fonction GarchFit :
+
+```{r, echo=FALSE}
+volat2=garchFit(rte_centre ~ garch(1,1), data=rte, trace=F, include.mean = F)
+summary(volat2)
+```
+
+Nous avons enlevé la constante car sa p-value était supérieur à 0.05.
+
+
+> Dans le cas où nous effectuerions l'ArchTest directement sur `volat2@residuals` (qui présente de l'autocorrélation) nous rencontrons des effets ARCH qu'il n'est impossible d'éviter. Dans ce cas-là, nous ne pouvons ni conclure ni effectuer l'`anscombe.test`.
+
+Après quelque recherche personnelle, j'ai tout de même pris l'initiative de normalisé les résidus afin de ne plus avoir d'autocorrélation : 
+
+```{r, echo=FALSE}
+# On normalise les résidus
+res = residuals(volat2, standardize = T)
+acf(res)
+```
+
+Nous pouvons désormais effectuer les ArchTest :
+
+```{r}
+ArchTest(res, lag=1)
+```
+
+```{r}
+ArchTest(res, lag=20)
+```
+
+```{r}
+ArchTest(res, lag=30)
+```
+
+Les p-value étant toutes supérieurs à 0.05, nous pouvons rejeter l'hypothèse nulle. Le modèle GARCH(1,1) a réussi à prendre en compte toute l’hétéroscédasticité conditionnelle. **Il n'y a donc pas d'effet ARCH**.
+
+**_NOTE:_** Dans le cadre où nous aurions gardé `volat2@residuals` nous n'aurions pas pu enlever les effets ARCH et nous n'aurons pas pu conclure et faire l'étape suivante. 
+
+Maintenant, on cherche à voir si les queues de distribution des aléas de notre ARMA-GARCH sont plus épaisses que celles d’une loi normale.
+
+$H0 ∶$ kurtosis $= 3 \quad VS \quad Ha :$ kurtosis $\neq 3$
+
+```{r, echo=FALSE}
+anscombe.test(res)
+```
+
+On trouve une p-value `< 2.2e-16` donc on rejette H0. De plus le kurtosis est de 38 > 3. Ainsi **les queues de distribution des aléas de notre ARMA-GARCH sont plus épaisses que celles d’une loi normale**.
+
+## Propriété 6 : Effet de levier
+
+```{r, echo=FALSE}
+sig<-rep(0,T)
+for(t in 1:T) {
+  sig[t]<-sqrt(sum(rte[t-22]-(sum(rte[t-22]/22)))^2/22) 
+}
+sigma=sig[24:T]*100 
+
+plot(log(pt[24:length(rte)]),type='l',col=2,axes=F,xlab="", ylab="",lwd=2)
+axis(2,at=seq(0.5,5,by=0.1)) # axe de gauche
+par(new=T)
+plot(sigma, col="grey",type='l',axes = F,xlab="", ylab="")
+axis(4,at=seq(0,8,by=0.25)) # axe de droite
+legend("topleft", c("log(pt)","sigma"),col = c(2, 1),lty=c(1,1))
+```
+
+On voit que les périodes de chute de marché sont caractérisées par une augmentation de la volatilité supérieur à celle consécutive à une hausse des cours. Mais pas systématiquement, on en conclut tout de même à la **présence d'effet de levier**.
+
+## Propriété 7 : La saisonnalité
+
+### 7.1 Effet week-end
+
+Les marchés financiers sont affectés par l’accumulation d’information durant les périodes de clôture du week-end ou encore durant les jours fériés ou après les vacances. D’après French et Roll (1986), Baillie et Bollerslev (1989) la variance des rendements augmente à partir du mercredi alors que d’après French et Roll (1986) elle est la plus forte le lundi.
+
+```{r, echo=FALSE}
+jour=format(dates[1:T], format = "%A")
+tableaures <- data.frame(matrix(NA,ncol=5,nrow=4))
+colnames(tableaures) <- c("Monday","Tuesday","Wednesday","Thursday","Friday")
+rownames(tableaures) <- c("moyenne en %","écart-type annuel en %","skewness","kurtosis")
+
+m<-seq(from=1,to=T,by=5)
+
+rtmar<-as.numeric(rte[m])
+
+rtmar<-as.numeric(rte[jour=="Tuesday"])
+tuesday<-mean(rtmar) #moyenne journaliere
+tableaures[1,2] <- tuesday*100 #moyenne journaliere en %
+tableaures[2,2] <- sd(rtmar)*100*sqrt(252) #ecart-type annualise en %
+tableaures[3,2] <- skewness(rtmar)
+tableaures[4,2] <- kurtosis(rtmar)
+rtmer<-as.numeric(rte[jour=="Wednesday"])
+wednesday<-mean(rtmer)
+tableaures[1,3] <- wednesday*100
+tableaures[2,3] <- sd(rtmer)*100*sqrt(252)
+tableaures[3,3] <- skewness(rtmer)
+tableaures[4,3] <- kurtosis(rtmer)
+rtjeu<-as.numeric(rte[jour=="Thursday"])
+thursday<-mean(rtjeu)
+tableaures[1,4] <- thursday*100
+tableaures[2,4] <- sd(rtjeu)*100*sqrt(252)
+tableaures[3,4] <- skewness(rtjeu)
+tableaures[4,4] <- kurtosis(rtjeu)
+rtven<-as.numeric(rte[jour=="Friday"])
+friday<-mean(rtven)
+tableaures[1,5] <- friday*100
+tableaures[2,5] <- sd(rtven)*100*sqrt(252)
+tableaures[3,5] <- skewness(rtven)
+tableaures[4,5] <- kurtosis(rtven)
+rtlun<-as.numeric(rte[jour=="Monday"])
+monday<-mean(rtlun)
+tableaures[1,1] <- monday*100
+tableaures[2,1] <- sd(rtlun)*100*sqrt(252)
+tableaures[3,1] <- skewness(rtlun)
+tableaures[4,1] <- kurtosis(rtlun)
+tableaures
+```
+
+Le lundi se caractérise par des rendements négatifs et une skewness négative, conformément à l'idée que l'accumulation d'informations durant le week-end entraîne une plus grande incertitude et une volatilité accrue, bien que l’écart-type soit modéré comparé aux autres jours. Le jeudi apparaît comme le jour le plus volatil avec une skewness positive, ce qui suggère qu’il y a plus d'opportunités de rendements positifs, mais avec un risque plus élevé d’événements extrêmes (kurtosis élevée). Bien que le vendredi ait un rendement moyen légèrement positif, la volatilité diminue par rapport au jeudi, mais reste plus élevée que le mercredi, ce qui reflète la clôture de la semaine.
+
+Ces résultats confirment les observations de French et Roll (1986) et de Baillie et Bollerslev (1989) : la volatilité est souvent plus importante le lundi, et elle tend à augmenter au milieu de la semaine, avec des rendements plus stables en fin de semaine. **Nous sommes bien en présence d'un effet week-end**.
+
+### 7.2 Effet janvier
+
+```{r, echo=FALSE}
+monthplot(rte, ylab="rendement",main="", cex.main=1,col.base=2,lwd.base=3)
+abline(h = 0.0022,col = 3,lwd = 1)
+```
+
+Les moyennes des rendements semblent constantes sur l'année mise à part une légère baisse en janvier, juillet et décembre. **Il ne semble donc pas y avoir d'effet janvier**.
+
+Nous pouvons cependant trouver un écart à la moyenne au mois de mars, on peut donc constater un **effet mars**.
+
+## Propriété 8 : Stationnarité
+
+### Dickey Fuller (DF)
+
+#### • Spécification Trend
+
+Nous allons commencer par la spécification *"trend"* qui consiste à estimer par les MCO :
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \beta_0 + \beta_1 \text{tendance}_t + \epsilon_t
+$$
+
+puis à tester :
+
+$$
+H_0 : \rho - 1 = 0 \text{ et } \beta_1 = 0 \quad vs \quad H_a : |\rho| < 1 \text{ et } \beta_1 \neq 0
+$$
+
+Nous testons d'abord la significativité de $\beta_1$ pour vérifier que la spécification soit la bonne :
+
+$$
+H_0 : \beta_1 = 0 \quad vs \quad H_a : \beta_1 \neq 0
+$$
+
+L'hypothèse nulle est rejetée au risque $\alpha$ de 5% si la *p-value* associée à $\beta_1$ est inférieure à $\alpha$.
+
+```{r, echo=FALSE}
+summary(ur.df(rte,type= "trend",lags=0))
+```
+
+On voit que $\beta_1$ le coefficient associé à la tendance nommée `tt` dans R n’est pas significative (puisque sa p-value dans la colonne `Pr(>||)` dans R est supérieur à 0.05), on accepte donc H0. Cela implique que le processus qui a généré les données ne pourra pas être TS. On passe au modèle contenant une constante, mais pas de tendance.
+
+#### • Spécification Drift
+
+La spécification *"drift"* consiste à estimer par les MCO :
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \beta_0 + \epsilon_t
+$$
+
+puis à tester :
+
+$$
+H_0 : \rho - 1 = 0 \text{ et } \beta_0 = 0 \quad vs \quad H_a : |\rho| < 1 \text{ et } \beta_0 \neq 0
+$$
+
+Nous commençons par tester la significativité de $\beta_0$ pour vérifier que la spécification soit la bonne :
+
+$$
+H_0 : \beta_0 = 0 \quad vs \quad H_a : \beta_0 \neq 0
+$$
+
+L'hypothèse nulle est rejetée au risque $\alpha$ de 5% si la *p-value* associée à $\beta_0$ est inférieure à $\alpha$.
+
+```{r, echo=FALSE}
+summary(ur.df(rte,type= "drift",lags=0))
+```
+
+On voit $\beta_0$ la constante (nommée `Intercept` dans R) n’est pas significative (0.16 > 0.05) donc on accepte H0 et cette régression n’est pas la bonne.
+
+#### • Spécification None
+
+```{r, echo=FALSE}
+summary(ur.df(rte,type= "none",lags=0))
+```
+
+La `t calculé` = -40.81 < -1.95 donc on rejette H0. On en conclut que **le PGD est stationnaire**. 
+
+Cette conclusion n’est valide que si les aléas de la régression de Dickey et Fuller ne sont pas auto-corrélés. Vérifions cela maintenant :
+
+```{r, echo=FALSE}
+plot(ur.df(rte,lag=0,type="none"))
+```
+
+D’après l’ACF toutes les valeurs des coefficients d’autocorrélation semblent se situer dans l’intervalle de confiance mis à part celle à l’ordre 0 et 7. **Il semble donc y avoir de l'autocorrélation**.
+
+Dans la PACF, cela semble se confirmer, car l’ensemble des coefficients d’autocorrélation partiels se situent dans l’intervalle de confiance mis à part à l'ordre 7.
+
+**Nous devons donc effectuer un test de RU dans le cadre de la régression ADF**.
+
+### Dickey Fuller Augmenté (ADF)
+
+Le test ADF correspond à un test DF avec des variables explicatives en plus qui représentent la variable retardée jusqu’à l’ordre P : 
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \sum_{p=1}^{P} \gamma_p \Delta y_{t-p} + \epsilon_t
+$$
+
+La valeur de Pmax est calculée par la formule de Schwert (1989) : $[12 \times (T/100)^0,25]$
+
+```{r, echo=FALSE}
+Schwert<-as.integer(12*(T/100)^(0.25))
+cat("Le critère de Schwert est calculé comme étant égal à", Schwert, ".\n")
+```
+
+#### • MAIC
+
+Nous devons maintenant minimiser le critère d’information de Ng et Perron (2001), le $MAIC(p)$, calculé pour différentes valeurs de p allant de 0 à Pmax (ici de 0 à 26). Le $MAIC(p)$ est donné par la formule
+suivante :
+
+$$
+MAIC(p) = \ln(\hat{\sigma}^2_p) + 2 \frac{(\tau_T(p)+p)}{T-Pmax}
+$$
+
+```{r, echo=FALSE}
+summary(CADFtest(rte, criterion="MAIC",type="none",max.lag.y=Schwert))
+```
+
+`“Max lag of the diff. dependent variable”` nous indique le nombre de variables explicatives à ajouter pour tenir compte de l’autocorrélation. 
+
+Nous avons ici `“Max lag of the diff. dependent variable”` = 0, on doit donc faire le BIC.
+
+#### • BIC
+
+```{r, echo=FALSE}
+summary(CADFtest(rte,criterion="BIC",type="none",max.lag.y=Schwert))
+```
+
+**_COURS :_** Si le MAIC et le BIC vous donnent `pmax = 0`, alors vous allez introduite pmax variables explicatives additionnelles dans la régression puis ôtez un par un les $\gamma$ qui ne sont pas significatifs jusqu’à aboutir à un modèle où le dernier $\gamma$ est significatif sachant qu’on s’accorde à dire que $\gamma$ est significatif si la valeur absolue de sa statistique $t > 1.6$. Vous pouvez ainsi aboutir à un modèle avec `lag=3` car  $\gamma_1$ ni $\gamma_2$ ne le sont :
+
+```{r echo=TRUE, results="hide"}
+summary(ur.df(rte,type= "none",lags=Schwert))
+summary(ur.df(rte,type= "none",lags=Schwert-1))
+```
+
+```{r, echo=TRUE}
+summary(ur.df(rte,type= "none",lags=Schwert-2))
+```
+
+Avec un lag de 22, le dernier coefficient a comme valeur absolue de sa statistique test supérieur à 1.6, c'est donc significatif. Le dernier coefficient est supérieur à 1.6, c'est donc significatif. De plus, comme la statistique de test de -8.42 est bien plus basse que la valeur critique au seuil de 5 %, nous pouvons rejeter l'hypothèse nulle de racine unitaire (non-stationnarité). Sur la base des résultats du test ADF, il semble que **la série `rte` testée est stationnaire**.
+
+**_COURS :_** Selon Perron (1989), les tests DF et ADF auront tendance à accepter H0 quand ils sont appliqués à une série stationnaire dont la tendance a subi un changement structurel.
+
+### Zivot et Andrews (ZA)
+
+Ici, nous réalisons la méthode décrite par Perron en 1989 qui consiste à partir de la forme de Schwert puis de diminuer le nombre de $\gamma$ de tel sorte que le dernier ait une statistique t en valeur absolue < 1.6 et l'avant dernier une statistique t en valeur absolue supérieur 1.6 : 
+
+$$
+H_0 : \rho = 1 \quad vs \quad H_a : |\rho| < 1 \
+$$
+
+```{r echo=TRUE, results="hide"}
+summary(ur.za(rte, model="both",lag=24))
+summary(ur.za(rte, model="both",lag=23))
+summary(ur.za(rte, model="both",lag=22))
+summary(ur.za(rte, model="both",lag=21))
+summary(ur.za(rte, model="both",lag=20))
+summary(ur.za(rte, model="both",lag=19))
+summary(ur.za(rte, model="both",lag=18))
+summary(ur.za(rte, model="both",lag=17))
+summary(ur.za(rte, model="both",lag=16))
+summary(ur.za(rte, model="both",lag=15))
+summary(ur.za(rte, model="both",lag=14))
+summary(ur.za(rte, model="both",lag=13))
+summary(ur.za(rte, model="both",lag=12))
+summary(ur.za(rte, model="both",lag=11))
+summary(ur.za(rte, model="both",lag=10))
+summary(ur.za(rte, model="both",lag=9))
+summary(ur.za(rte, model="both",lag=8))
+summary(ur.za(rte, model="both",lag=7))
+summary(ur.za(rte, model="both",lag=6))
+summary(ur.za(rte, model="both",lag=5))
+summary(ur.za(rte, model="both",lag=4))
+summary(ur.za(rte, model="both",lag=3))
+```
+
+**_NOTE :_** Nous ne pouvons pas rigoureusement dans notre cas appliquer la méthode de Perron. Car la condition n'est jamais atteinte. On prendra donc ici le modèle qui s'y rapproche le plus soit `lag = 2` :
+
+```{r}
+summary(ur.za(rte, model="both",lag=2))
+```
+
+On voit que :
+
+- La statistique t en valeur absolue de $𝛾1 = 1.571 ≃ 1,6$
+
+- La statistique t en valeur absolue de $𝛾2 = 0.235 < 1,6$
+
+- les coefficients $δ1$ et $δ2$ sont significatifs (ici `du` et `dt`)
+
+La statistique de test est $-24.8727 < −5.08$ la valeur critique à 5 %. On rejette donc H0.
+
+**Cela pourrait nous amener à penser que le PGD est TS avec un changement structurel**. Cependant, cette conclusion ne peut pas être tirée de manière définitive. Il est aussi envisageable que le PGD soit DS avec un changement structurel.
+
+La date de rupture est la 272e observation qui correspond à la date :
+
+```{r, echo=FALSE}
+dates[272]
+```
+
+Nous pouvons constater la date de rupture sur le graphique ci-dessous :
+
+```{r, echo=FALSE}
+plot(ur.za(rte, model="both",lag=2))
+```
+
+> En janvier 2014, Square Enix avait commencé à se redresser après plusieurs années difficiles dues à des titres décevants et des pertes financières. En effet, en 2013, la société a publié plusieurs jeux à succès, dont "Final Fantasy XIV: A Realm Reborn", qui a été un succès critique et commercial après l'échec de la version initial en 2010. Ce relancement a probablement soutenu les performances financières de la société, stimulant ainsi la confiance des investisseurs. L'impact de ce redressement a pu se faire sentir au début de 2014, expliquant cette date de rupture.
+
+### Lee et Strazicich (LS)
+
+Le test de Lee et Strazicich est une généralisation du test de racine unitaire de Schmidt et Phillips (SP). Ils ont généralisé le test SP en employant la classification des changements structurels de Perron (1989) ”crash” et ”both” sachant qu’ils les appellent respectivement ”crash”et ”break” et en introduisant 2 dates de rupture endogènes. Le mod`ele est le suivant :
+
+$$
+y_t = \delta' Z_t + e_t
+e_t = \beta e_{t-1} + \varepsilon_t
+$$
+
+avec $\varepsilon \sim \mathcal{N}(0,\sigma^2)$ et $Z$ la matrice des variables exogènes.
+
+Soit $T_{B1}$ la date du premier changement structurel et $T_{B2}$ la date du second.
+
+- ”crash” : $Z_t = [\iota, tendance, DU_{1t}, DU_{2t}]'$ avec $DU_{jt} = 1$ si $t≥T_{Bj} + 1$ pour $j=1,2$ et $0$ sinon
+
+- ”break” : $Z_t = [\iota, tendance, DU_{1t}, DU_{2t}, DT_{1t} , DT_{2t}]'$ avec $DT_{jt} = t- T_{Bj}$ si $t≥T_{Bj} + 1$ pour $j=1,2$ et $0$ sinon
+
+
+Pour **"crash"**, nous testons : 
+
+$$
+H0 : y_t = \mu_0 + d_1 B_{1t} + d_2 B_{2t} + y_{t-1} + v_{1t}
+
+VS
+
+Ha : y_t = \mu_1 + \gamma \times trend_t + d_1 D_{1t} + d_2 D_{2t} + v_{2t}
+$$
+
+Pour **"break"**, nous testons : 
+
+$$
+H0 : y_t = \mu_0 + d_1 B_{1t} + d_2 B_{2t} + d_3 D_{1t} + d_4 D_{2t} + y_{t-1} + v_{1t}
+
+VS
+
+Ha : y_t = \mu_1 + \gamma \times trend_t + d_1 D_{1t} + d_2 D_{2t} + d_3 DT_{1t} + d_4 DT_{2t} + v_{2t}
+$$
+
+Notons que dans tous les cas, le PGD comprend des changements structurels sous H0 et sous Ha.
+
+Le test LS peut s’effectuer avec ou sans boostrap. Dans notre cas, nous n’utiliserons pas boostrap car ce
+dernier est employé lorsque nous avons un faible nombre d’observation. Ce qui n'est pas le cas pour notre sére `rte` (nombre de jour supérieur à 100). 
+
+```{r, echo=FALSE}
+#source("C:\\Users\\mlebreto\\Documents\\gretha\\2020-2021\\M1IREF\\LeeStrazicichUnitRoot-master(2)\\LeeStrazicichUnitRoot-master\\LeeStrazicichUnitRootTest.R")
+source("/Users/alexandra/iref/s3/VaR/LeeStrazicichUnitRoot-master/LeeStrazicichUnitRootTest.R")
+myBreaks <- 1
+myModel <- "crash"
+myLags <- Schwert
+myLS_test <- ur.ls(y=rte , model = myModel, breaks = myBreaks, lags = myLags, method = "GTOS", pn = 0.1, print.results = "print")
+```
+
+`First possible structural break at position: 1525`
+
+Cette position correspond à la date : 
+
+```{r, echo=FALSE}
+dates[1525]
+```
+
+> Cette date de rupture peut avoir un lien avec un ralentissement temporaire après une période de grande anticipation. En effet, en janvier 2019, il y avait une grande attente autour de la sortie du jeu "Kingdom Hearts III", qui est finalement sorti le 25 janvier 2019. Souvent, lorsque la sortie d'un jeu très attendu approche, les investisseurs peuvent être prudents, ce qui peut provoquer une baisse des actions en raison des incertitudes sur les critiques et les ventes réelles. Après le pic d'attente, certains investisseurs peuvent avoir décidé de prendre leurs bénéfices, entraînant une chute temporaire de l'action avant que les performances réelles ne soient connues.
+
+La valeur de la statistique du test est -8.208032 ce qui est inférieur à la valeur critique -3.566. On rejette alors H0 ce qui nous permet de conclure que le PGD qui a généré la série `rte` et donc il n’y a pas de racine unitaire.
+
+De plus, le PGD ne peut pas être TS puisque nous avons vu qu’il n’y a pas de tendance. **La conclusion est
+que le PGD qui a généré notre série est stationnaire avec une date de rupture en janvier 2019**.
+
+# Étude des 8 caractéristiques la série rtt
+
+Voici le chronogramme de la série `rtt` : 
+
+```{r, echo=FALSE}
+# Supposons que rtt soit déjà au format série temporelle
+plot(rtt, main = "Chronogramme de la série rtt", xlab = "Temps", ylab = "Rendements", col = "#A4163E", type = "l")
+```
+
+La série `rtt` n'a visuellement pas l'air d'avoir de tendance, elle fluctue autour de 0. De plus, la variance semble diminuer au cours du temps, on détectera sans doute de l'hétéroscédasticité.
+
+## Propriété 1 : Asymétrie perte / gain
+
+### Hypothèses
+
+$H_0 : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^3\right] = 0 \quad VS \quad H_a : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^3\right] \neq 0$
+
+### Cas pratique
+
+```{r, echo=FALSE}
+agostino.test(rtt)
+```
+
+Le coefficient du skewness n'est pas significatif puisque la p-value étant supérieur 0.05 on accepte donc H0. La skewness est statistiquement nulle, **la distribution est symétrique**.
+
+## Propriété 2 : Queues de distribution épaisses
+
+### Hypothèses
+
+$H_0 : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^4\right] = 3 \quad VS \quad H_a : E\left[\left(\frac{X - E(X)}{\sigma_X}\right)^4\right] \neq 3$
+
+### Cas pratique
+
+```{r, echo=FALSE}
+anscombe.test(rtt)
+```
+
+La p-value du test d’Anscombe étant `< 2.2e-16` est inférieur à 0.05 on rejette H0, ce qui indique que le kurtosis est significatif. Celui-ci vaut `16` > 3 la distribution est donc **leptokurtique**. Ainsi, les queues de distribution sont plus épaisses que celles d’une loi normale centrée réduite.
+
+## Propriété 3 : Autocorrélations des carrés des rendements fortes et faibles pour les rendements
+
+### Réalisation de l'ACF et de la PACF
+
+```{r, echo=FALSE}
+op<-par(mfrow=c(2,2))
+Acf(rtt,main="ACF du rendement logarithmique") 
+Pacf(rtt,main="PACF du rendement logarithmique") 
+Acf(rtt^2,main="ACF du rendement logarithmique au carré") 
+Pacf(rtt^2,main="PACF du rendement logarithmique au carré")
+```
+
+### Réalisation de la statistique de Ljung-Box
+
+#### Hypothèses
+
+$H0 ∶ \rho(k) = 0$ pour k = 1 jusqu’à K $\quad VS \quad H_a : \rho(k) \neq 0$ pour au moins une valeur de k comprise entre 1 et K
+
+#### Cas pratique
+
+##### • Autocorrélations des carrés des rendements $rtt^2$
+
+```{r, echo=FALSE}
+pvaluesrtt =rep(0,20)
+pvaluesrtt2 =rep(0,20)
+for (i in 1:25 ) {
+  pvaluesrtt[i] = Box.test(rtt,lag=i,type="Ljung-Box")$p.value
+  pvaluesrtt2[i] = Box.test(rtt^2,lag=i,type="Ljung-Box")$p.value
+}
+
+pvaluesrtt2
+```
+
+Toutes les p-values sont inférieures à 0.05 pour `rtt^2` à part à l'ordre 1. On rejette donc H0 et on conclut à la **présence d’autocorrélation dans les rendements au carré**.
+
+##### • Autocorrélations des rendements rtt
+
+```{r, echo=FALSE}
+pvaluesrtt
+```
+
+Les p-values aux ordres 4, 5 et toutes celles partir de 11 sont inférieurs à 0.05 pour `rtt`. On rejette donc H0 et on conclut qu'il y a **présence d'autocorrélation**.
+
+Pour modéliser cette caractéristique, nous utiliserons un modèle ARMA(p,q) dont la mise en œuvre contient 3 étapes.
+
+#### • Étape 1 : Détermination de p et p du ARMA(p,q) via l’eacf
+
+```{r, echo=FALSE}
+eacf(rtt)
+```
+
+On trouve p = 4 et q = 4.
+
+#### • Étape 2 : Estimation du modèle ARMA(p,q) avec les valeurs trouvées via l’eacf
+
+##### Estimation du modèle ARMA(4,4)
+
+```{r, echo=FALSE}
+reg1<-Arima(rtt, order=c(4,0,4), fixed=c(NA,NA,NA,NA,NA,NA,NA,NA,NA))
+coeftest(reg1)
+```
+
+Aucune p-value est significative. On enlève les deux coefficients les plus élevés, c'est-à-dire `ar3` et `ma3` :
+
+```{r, echo=FALSE}
+reg1<-Arima(rtt, order=c(4,0,4), fixed=c(NA,NA,0,NA,NA,NA,0,NA,NA))
+coeftest(reg1)
+```
+
+Tous les coefficients ne sont pas significatifs. On enlève l'`intercept` :
+
+```{r, echo=FALSE}
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(NA,NA,0,NA,NA,NA,0,NA))
+coeftest(reg1)
+```
+
+Seulement `ar4` n'est pas significatif, on l'enlève : 
+
+```{r, echo=FALSE}
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(NA,NA,0,0,NA,NA,0,NA))
+coeftest(reg1)
+```
+
+Il ne reste plus que `ma4` qui à une p-value inférieur à 0.05. On enlève donc le coefficient donc la pvalue est la plus élevée, soit ici `ma1` :
+
+```{r, echo=FALSE}
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(NA,NA,0,0,NA,NA,0,NA))
+coeftest(reg1)
+```
+
+En procédant toujours de la même manière, c'est-à-dire en enlevant un à un le coefficient dont la p-value est la plus élevée et supérieur à 0.05, on obtient :
+
+```{r echo=TRUE, results="hide"}
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(0,NA,0,0,NA,NA,0,NA))
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(NA,NA,0,0,0,NA,0,NA))
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(NA,NA,0,0,0,0,0,NA))
+```
+
+```{r}
+reg1<-Arima(rtt, order=c(4,0,4),include.mean=F,fixed=c(0,NA,0,0,0,0,0,NA))
+coeftest(reg1)
+```
+
+Le modèle est correct, car tous les coefficients sont significatifs. On détermine maintenant sa valeur de BIC :
+
+```{r echo=FALSE}
+BIC(reg1)
+```
+
+Afin d'être sûr que ce modèle est le meilleur nous avons tester d'autres modèles :
+
+##### Estimation du modèle ARMA(3,3)
+
+```{r echo=TRUE, results="hide"}
+reg2<-Arima(rtt, order=c(3,0,3), fixed=c(NA,NA,NA,NA,NA,NA,NA))
+reg2<-Arima(rtt, order=c(3,0,3), fixed=c(NA,0,NA,NA,NA,NA,NA))
+reg2<-Arima(rtt, order=c(3,0,3),include.mean=F, fixed=c(NA,0,NA,NA,NA,NA))
+```
+
+```{r}
+reg2<-Arima(rtt, order=c(3,0,3),include.mean=F, fixed=c(NA,0,NA,NA,NA,NA))
+coeftest(reg2)
+```
+
+Le modèle est correct, car tous les coefficients sont significatifs. On détermine maintenant sa valeur de BIC :
+
+```{r echo=FALSE}
+BIC(reg2)
+```
+
+Le BIC associé à l'ARMA(3,3) est supérieur à celui associé à l'ARMA(4,4) on garde donc notre premier modèle pour l'instant. 
+
+##### Estimation du modèle ARMA(1,1)
+
+```{r echo=TRUE}
+reg3 = Arima(rtt, order=c(1,0,1))
+```
+
+```{r}
+reg3 = Arima(rtt, order=c(1,0,1),include.mean=F)
+coeftest(reg3)
+```
+
+Le modèle est correct, car tous les coefficients sont significatifs. On détermine maintenant sa valeur de BIC :
+
+```{r echo=FALSE}
+BIC(reg3)
+```
+
+Le BIC associé à l'ARMA(1,1) est supérieur à celui associé à l'ARMA(4,4) on garde donc notre premier modèle pour l'instant. 
+
+##### Estimation du modèle MA(13)
+
+```{r echo=TRUE, results="hide"}
+reg4<-Arima(rtt, order=c(0,0,13), fixed=c(NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA))
+reg4<-Arima(rtt, order=c(0,0,13), fixed=c(NA,NA,NA,NA,0,NA,NA,NA,NA,0,NA,NA,NA,NA))
+reg4<-Arima(rtt, order=c(0,0,13), fixed=c(NA,NA,0,NA,0,NA,NA,NA,0,0,NA,NA,NA,NA))
+reg4<-Arima(rtt, order=c(0,0,13),include.mean=F,fixed=c(NA,NA,0,NA,0,NA,0,NA,0,0,NA,NA,NA))
+reg4<-Arima(rtt, order=c(0,0,13),include.mean=F,fixed=c(0,NA,0,NA,0,NA,0,NA,0,0,NA,NA,NA))
+reg4<-Arima(rtt, order=c(0,0,13),include.mean=F,fixed=c(0,NA,0,NA,0,NA,0,NA,0,0,NA,0,NA))
+```
+
+```{r}
+reg4<-Arima(rtt, order=c(0,0,13),include.mean=F,fixed=c(0,NA,0,NA,0,0,0,0,0,0,NA,0,NA))
+coeftest(reg4)
+```
+
+Le modèle est correct, car tous les coefficients sont significatifs. On détermine maintenant sa valeur de BIC :
+
+```{r echo=FALSE}
+BIC(reg4)
+```
+
+Le BIC associé à l'MA(13) est supérieur à celui associé à l'ARMA(4,4) on garde donc notre premier modèle. 
+
+Ce modèle MA(4,4) sert à modéliser l’autocorrélation détectée dans `rtt`. Il y arrive si les coefficients sont significatifs et si les aléas du modèle MA(5) ont une espérance nulle et ne sont pas autocorrélées
+
+#### • Étape 3 : Les aléas du modèle ont-ils une espérance nulle et sont-ils non-autocorrélés ?
+
+##### (a) Test d’espérance nulle des aléas du modèle MA sans la constante
+
+$H0 ∶ \mathbb{E}[\varepsilon] = 0 \quad VS \quad Ha ∶ \mathbb{E}[\varepsilon] \neq 0$
+
+```{r, echo=FALSE}
+residu<-reg4$res
+t.test(residu)
+```
+
+La p-value $= 0.78 > 0.05$ donc on accepte H0. On conclut donc que l’espérance des aléas est nulle et on passe au test d’absence d’autocorrélation.
+
+##### (b) Test d’absence d’autocorrélation dans les aléas du modèle ARMA
+
+$H0$ : Absence d’autocorrélation jusqu’à l’ordre K $\quad VS \quad Ha$ : Présence d’autocorrélation
+
+```{r, echo=FALSE}
+residuv_rtt=(residu-mean(residu))/sd(residu)
+K<-20
+tmp<-rep(0,K)
+for(i in 1:K){
+  tmp[i]<-Box.test(residuv_rtt,lag=i,type="Ljung-Box")$p.value
+}
+tmp
+```
+
+Les p-values sont toutes supérieures à 0.05 donc on accepte H0 et on conclut qu’il n’y a pas d’autocorrélation dans les aléas jusqu’à l’ordre 20.
+
+## Propriété 4 : Clusters de volatilité
+
+### Hypothèses
+
+$H0 ∶ \alpha1 = \alpha2 = ... = \alpha m = 0$ donc homoscédasticité conditionnelle 
+
+$VS$
+
+$Ha ∶ \alpha i \neq 0$ avec $i \neq 0$ donc hétéroscédasticité conditionnelle.
+
+### Cas pratique
+
+```{r, echo=FALSE}
+LM1<-ArchTest(as.numeric(rtt),lag=1)
+LM1
+```
+
+La p-value = 0.2286 est > 0.05, on accepte donc H0 et donc il y a absence de clusters de volatilité à l’ordre 1 dans `rtt`.
+
+```{r, echo=FALSE}
+LM2<-ArchTest(as.numeric(rtt),lag=2)
+LM2
+```
+
+La p-value = 0.004902 est < 0.05, on rejette donc H0 et donc il y a présence de clusters de volatilité à l’ordre 2 dans `rtt`.
+
+```{r, echo=FALSE}
+LM20<-ArchTest(as.numeric(rtt),lag=20)
+LM20
+```
+
+La p-value = 1.827e-06 < 0.05, on rejette donc H0. Il y a présence de clusters de volatilité dans `rtt`.
+
+```{r, echo=FALSE}
+LM30<-ArchTest(as.numeric(rtt),lag=30)
+LM30
+```
+
+Les p-values sont quasi toutes inférieures à 0.05. On rejette donc H0. **Il y a donc des clusters de volatilité dans la série `rtt`**.
+
+## Propriété 5 : Queues épaisses conditionnelles
+
+```{r, echo=FALSE}
+volat<-garch(residuv_rtt,order=c(1,1)) 
+summary(volat)
+```
+
+En procédant de cette manière, nous obtenons l'information `FALSE CONVERGENCE`. Pour remédier à cela, nous utilisons la fonction GarchFit :
+
+```{r, echo=FALSE}
+volat2=garchFit(residuv_rtt ~ garch(1,1), data=rtt, trace=F, include.mean = F)
+summary(volat2)
+```
+
+```{r}
+ArchTest(volat2@residuals,lag=1)
+```
+
+```{r}
+ArchTest(volat2@residuals,lag=2)
+```
+
+```{r}
+ArchTest(volat2@residuals,lag=20)
+```
+
+L'ensemble des p-value sont supérieurs à 0.05. On rejette donc H0. **On en conclut qu'il n'y a pas d'effet ARCH**.
+
+Maintenant, on cherche à voir si les queues de distribution des aléas de notre ARMA-GARCH sont plus épaisses que celles d’une loi normale.
+
+$H0 ∶$ kurtosis $= 3 \quad VS \quad Ha :$ kurtosis $\neq 3$
+
+```{r, echo=FALSE}
+anscombe.test(volat$res)
+```
+
+On trouve une p-value < 2.2e-16 donc on rejette H0. De plus, le kurtosis est supérieur à 3. Ainsi, les queues de distribution des aléas de notre ARMA-GARCH sont plus épaisses que celles d’une loi normale.
+
+## Propriété 6 : Effet de levier
+
+```{r, echo=FALSE}
+sig<-rep(0,T2)
+for(t in 1:T2) {
+  sig[t]<-sqrt(sum(rtt[t-22]-(sum(rtt[t-22]/22)))^2/22) 
+}
+sigma=sig[24:T2]*100 
+
+plot(log(pt[24:length(rtt)]),type='l',col=2,axes=F,xlab="", ylab="",lwd=2)
+axis(2,at=seq(0.5,3.8,by=0.1))#axe de gauche
+par(new=T)
+plot(sigma, col="grey",type='l',axes = F,xlab="", ylab="")
+axis(4,at=seq(0,3.8,by=0.1))#axe de droite
+legend("topleft", c("log(pt)","sigma"),col = c(2, 1),lty=c(1,1))
+```
+
+On voit que les périodes de chute de marché sont caractérisées par une augmentation de la volatilité supérieur à celle consécutive à une hausse des cours. On en conclut tout de même à la **présence d'effet de levier**.
+
+## Propriété 7 : La saisonnalité
+
+### 7.1 Effet week-end
+
+Les marchés financiers sont affectés par l’accumulation d’information durant les périodes de clôture du week-end ou encore durant les jours fériés ou après les vacances. D’après French et Roll (1986), Baillie et Bollerslev (1989) la variance des rendements augmente à partir du mercredi alors que d’après French et Roll (1986) elle est la plus forte le lundi.
+
+```{r, echo=FALSE}
+jour=format(dates[1:T2], format = "%A")
+tableaures <- data.frame(matrix(NA,ncol=5,nrow=4))
+colnames(tableaures) <- c("Monday","Tuesday","Wednesday","Thursday","Friday")
+rownames(tableaures) <- c("moyenne en %","écart-type annuel en %","skewness","kurtosis")
+
+m<-seq(from=1,to=T2,by=5)
+
+rtmar<-as.numeric(rtt[m])
+
+rtmar<-as.numeric(rtt[jour=="Tuesday"])
+tuesday<-mean(rtmar) #moyenne journaliere
+tableaures[1,2] <- tuesday*100 #moyenne journaliere en %
+tableaures[2,2] <- sd(rtmar)*100*sqrt(252) #ecart-type annualise en %
+tableaures[3,2] <- skewness(rtmar)
+tableaures[4,2] <- kurtosis(rtmar)
+rtmer<-as.numeric(rtt[jour=="Wednesday"])
+wednesday<-mean(rtmer)
+tableaures[1,3] <- wednesday*100
+tableaures[2,3] <- sd(rtmer)*100*sqrt(252)
+tableaures[3,3] <- skewness(rtmer)
+tableaures[4,3] <- kurtosis(rtmer)
+rtjeu<-as.numeric(rtt[jour=="Thursday"])
+thursday<-mean(rtjeu)
+tableaures[1,4] <- thursday*100
+tableaures[2,4] <- sd(rtjeu)*100*sqrt(252)
+tableaures[3,4] <- skewness(rtjeu)
+tableaures[4,4] <- kurtosis(rtjeu)
+rtven<-as.numeric(rtt[jour=="Friday"])
+friday<-mean(rtven)
+tableaures[1,5] <- friday*100
+tableaures[2,5] <- sd(rtven)*100*sqrt(252)
+tableaures[3,5] <- skewness(rtven)
+tableaures[4,5] <- kurtosis(rtven)
+rtlun<-as.numeric(rtt[jour=="Monday"])
+monday<-mean(rtlun)
+tableaures[1,1] <- monday*100
+tableaures[2,1] <- sd(rtlun)*100*sqrt(252)
+tableaures[3,1] <- skewness(rtlun)
+tableaures[4,1] <- kurtosis(rtlun)
+tableaures
+```
+
+French et Roll (1986) observent que la variance des rendements est la plus forte le lundi. Cela correspond partiellement à notre tableau, où l'écart-type du lundi est effectivement élevé (38,19 %), bien que ce ne soit pas le plus élevé comparé à d'autres jours (comme le jeudi avec 45,92 %). Cette variance élevée pourrait s'expliquer par l'accumulation d'informations durant le week-end, qui se répercute sur les prix des actifs au début de la semaine, créant une plus grande incertitude et volatilité.
+
+Baillie et Bollerslev (1989) soutiennent que la variance augmente à partir du mercredi. Dans nos données, on observe que l'écart-type du mercredi (31,71 %) est effectivement plus faible que les autres jours, mais une forte hausse de la volatilité se manifeste à partir du jeudi (45,92 %), ce qui pourrait être lié à l'effet d'accumulation d'information au milieu de la semaine, entraînant une instabilité accrue.
+
+**Nous sommes bien en présence d'un effet week-end**
+
+### 7.2 Effet janvier
+
+```{r, echo=FALSE}
+monthplot(rtt, ylab="rendement",main="", cex.main=1,col.base=2,lwd.base=3)
+abline(h = 0.0022,col = 3,lwd = 1)
+```
+
+Les moyennes des rendements semblent constantes sur l’année mise à part une légère baisse en février et novembre Il ne semble donc pas y avoir d’effet janvier.
+
+Nous pouvons cependant trouver un écart à la moyenne au mois de septembre où l'écart à la moyenne est élevé (négativement), on peut donc constater un **effet septembre**.
+
+## Propriété 8 : Stationnarité
+
+Un processus stochastique {Xt} est stationnaire au second ordre si :
+
+- $\mathbb{E}[X_t] = \mu$, une constante
+
+- $Var(X_t) < \inf$
+
+- $autocov(X_t,X_{t−s}) = \mathbb{E}[(X_t − \mu)(X_{t−s} − \mu)]= \gamma_s$ qui ne dépend que de s.
+
+Un Bruit Blanc (BB) est une séquence de variables aléatoires iid de moyenne nulle, de variance constante et non autocorrélées. Simulation d’un BB gaussien de moyenne nulle et d’écart-type 1 = tirage aléatoire dans une normale centrée résuite
+
+### Dickey Fuller (DF)
+
+#### • Spécification Trend
+
+Nous allons commencer par la spécification *"trend"* qui consiste à estimer par les MCO :
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \beta_0 + \beta_1 \text{tendance}_t + \epsilon_t
+$$
+
+puis à tester :
+
+$$
+H_0 : \rho - 1 = 0 \text{ et } \beta_1 = 0 \quad vs \quad H_a : |\rho| < 1 \text{ et } \beta_1 \neq 0
+$$
+
+Nous testons d'abord la significativité de $\beta_1$ pour vérifier que la spécification soit la bonne :
+
+$$
+H_0 : \beta_1 = 0 \quad vs \quad H_a : \beta_1 \neq 0
+$$
+
+L'hypothèse nulle est rejetée au risque $\alpha$ de 5% si la *p-value* associée à $\beta_1$ est inférieure à $\alpha$.
+
+```{r, echo=FALSE}
+summary(ur.df(rtt,type= "trend",lags=0))
+```
+
+Tout d'abord, nous regardons la p-value associé à $\beta1$ qui est > 0.05 (seuil de significativité). On en déduit que $\beta1$ n'est pas significatif. Alors la spécification "trend" n'est pas la bonne et nous passons à la spécification "drift"
+
+#### • Spécification Drift
+
+La spécification *"drift"* consiste à estimer par les MCO :
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \beta_0 + \epsilon_t
+$$
+
+puis à tester :
+
+$$
+H_0 : \rho - 1 = 0 \text{ et } \beta_0 = 0 \quad vs \quad H_a : |\rho| < 1 \text{ et } \beta_0 \neq 0
+$$
+
+Nous commençons par tester la significativité de $\beta_0$ pour vérifier que la spécification soit la bonne :
+
+$$
+H_0 : \beta_0 = 0 \quad vs \quad H_a : \beta_0 \neq 0
+$$
+
+L'hypothèse nulle est rejetée au risque $\alpha$ de 5% si la *p-value* associée à $\beta_0$ est inférieure à $\alpha$.
+
+```{r, echo=FALSE}
+summary(ur.df(rtt,type= "drift",lags=0))
+```
+
+Tout d'abord, nous regardons la p-value associé à $\beta0$ qui est > 0.05 (seuil de significativité). On en déduit que $\beta0$ n'est pas significatif. Alors la spécification "drift" n'est pas la bonne et nous passons à la spécification "none"
+
+#### • Spécification None
+
+La spécification *"none"* consiste à estimer par les MCO :
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \epsilon_t
+$$
+
+puis à tester :
+
+$$
+H_0 : \rho - 1 = 0 \quad vs \quad H_a : |\rho| < 1
+$$
+Si on accept H0 alors le processus est DS sinon le processus est stationnaire.
+
+```{r, echo=FALSE}
+summary(ur.df(rtt,type= "none",lags=0))
+```
+
+Pour savoir si on accepte H0 ou non, la règle de décision est si la valeur de la statistique t associée à $(\rho - 1) >$ à la valeur critique donnée à l'intersection de la ligne tau 1 et de la colonne 5% on accepte H0.
+
+Ici, la valeur de la statistique t associée à (rho - 1) est inférieur à la valeur critique. On rejette donc H0. **On en conclut donc que le PDG est stationnaire avec Dickey-Fuller**.
+
+Cette conclusion n’est valide que si les aléas de la régression de Dickey Fuller ne sont pas auto-corrélés. Vérifions cela maintenant :
+
+```{r, echo=FALSE}
+plot(ur.df(rtt,lag=0,type="none"))
+```
+
+Les conclusions du test DF ne sont valables que s'il n'y a pas d'autocorrélation. Or, ici, les aléas sont autocorrélés donc notre conclusion n'est pas valide. **Nous devons donc effectuer le test de Dickey-Fuller Augmenté (ADF)**.
+
+### Dickey-Fuller Augmenté (ADF)
+
+Le test ADF correspond à un test DF avec des variables explicatives en plus qui représentent la variable retardée jusqu’à l’ordre P : 
+
+$$
+\Delta y_t = (\rho - 1) y_{t-1} + \sum_{p=1}^{P} \gamma_p \Delta y_{t-p} + \epsilon_t
+$$
+
+La valeur de Pmax est calculée par la formule de Schwert (1989) : $[12 \times (T/100)^0,25]$
+
+```{r, echo=FALSE}
+Schwert<-as.integer(12*(T2/100)^(0.25))
+cat("Le critère de Schwert est calculé comme étant égal à", Schwert, ".\n")
+```
+
+#### • MAIC
+
+Nous devons maintenant minimiser le critère d’information de Ng et Perron (2001), le $MAIC(p)$, calculé pour différentes valeurs de p allant de 0 à Pmax (ici de 0 à 26). Le $MAIC(p)$ est donné par la formule
+suivante :
+
+$$
+MAIC(p) = \ln(\hat{\sigma}^2_p) + 2 \frac{(\tau_T(p)+p)}{T-Pmax}
+$$
+
+```{r, echo=FALSE}
+summary(CADFtest(rtt, criterion="MAIC",type="none",max.lag.y=Schwert))
+```
+
+On trouve `“Max lag of the diff.dependent variable”` = 0, on doit donc faire le BIC.
+
+#### • BIC
+
+```{r, echo=FALSE}
+summary(CADFtest(rtt,criterion="BIC",type="none",max.lag.y=Schwert))
+```
+
+On trouve `“Max lag of the diff.dependent variable”` = 0, on doit donc partir de la valeur de Schwert.
+
+**_COURS :_** Si le MAIC et le BIC vous donnent `pmax = 0`, alors vous allez introduite pmax variables explicatives additionnelles dans la régression puis ôtez un par un les $\gamma$ qui ne sont pas significatifs jusqu’à aboutir à un modèle où le dernier $\gamma$ est significatif sachant qu’on s’accorde à dire que $\gamma$ est significatif si la valeur absolue de sa statistique $t >1.6$. Vous pouvez ainsi aboutir à un modèle avec `lag=3` car  $\gamma_1$ ni $\gamma_2$ ne le sont :
+
+```{r}
+summary(ur.df(rtt,type= "none",lags=Schwert))
+```
+
+Le dernier coefficient est supérieur à 1.6, c'est donc significatif. De plus, comme la statistique de test de -8.34 est bien plus basse que la valeur critique au seuil de 5 %, nous pouvons rejeter l'hypothèse nulle de racine unitaire (non-stationnarité). Sur la base des résultats du test ADF, il semble que **la série `rtt` testée est stationnaire**.
+
+### Zivot et Andrews (ZA)
+
+Ici, nous réalisons la méthode décrite par Perron en 1989 qui consiste à partir de la forme de Schwert puis de diminuer le nombre de $\gamma$ de telle sorte que le dernier ait une statistique t en valeur absolue < 1.6 et l'avant dernier une statistique t en valeur absolue supérieure 1.6 :
+
+$$
+H_0 : \rho = 1 \quad vs \quad H_a : |\rho| < 1 \
+$$
+
+```{r echo=TRUE, results="hide"}
+summary(ur.za(rtt, model="both",lag=22))
+summary(ur.za(rtt, model="both",lag=21))
+summary(ur.za(rtt, model="both",lag=20))
+summary(ur.za(rtt, model="both",lag=19))
+summary(ur.za(rtt, model="both",lag=18))
+summary(ur.za(rtt, model="both",lag=17))
+```
+
+```{r}
+summary(ur.za(rtt, model="both",lag=16))
+```
+
+On voit que :
+
+- La statistique t en valeur absolue de $𝛾15 = 1.967 > 1,6$
+
+- La statistique t en valeur absolue de $𝛾16 = 0.495 < 1,6$
+
+- les coefficients $δ1$ et $δ2$ sont significatifs (ici `du` et `dt`)
+
+La statistique de test est $-9.9161  < −5.08$ la valeur critique à 5%. On rejette donc H0.
+
+**Cela pourrait nous amener à penser que le PGD est TS avec un changement structurel**. Cependant, cette conclusion ne peut pas être tirée de manière définitive. Il est aussi envisageable que le PGD soit DS avec un changement structurel.
+
+La date de rupture est la 164e observation qui correspond à la date :
+
+```{r, echo=FALSE}
+dates[164]
+```
+
+Nous pouvons constater la date de rupture sur le graphique ci-dessous :
+
+```{r, echo=FALSE}
+plot(ur.za(rtt, model="both",lag=16))
+```
+
+> La date de rupture étant le 27 août 2013, nous nous sommes intéressés à l'actualité de l'époque chez Square Enix. Square Enix a connu une phase difficile entre 2010 et 2013, mais en 2013, la société a commencé à voir des signes de redressement. La hausse en août 2013 peut être attribuée à l'anticipation de la sortie imminente de "Final Fantasy XIV: A Realm Reborn", qui a été relancé le 27 août 2013. Le jeu était attendu avec impatience après l'échec de la version initiale, et la réception positive du relancement a probablement contribué à la hausse de l'action. Cela a marqué un tournant dans la réputation de Square Enix, qui commençait à regagner la confiance des joueurs et des investisseurs.
+
+### Lee et Strazicich (LS)
+
+Le test de Lee et Strazicich est une généralisation du test de racine unitaire de Schmidt et Phillips (SP). Ils ont généralisé le test SP en employant la classification des changements structurels de Perron (1989) ”crash” et ”both” sachant qu’ils les appellent respectivement ”crash”et ”break” et en introduisant 2 dates de rupture endogènes. Le mod`ele est le suivant :
+
+$$
+y_t = \delta' Z_t + e_t
+e_t = \beta e_{t-1} + \varepsilon_t
+$$
+
+avec $\varepsilon \sim \mathcal{N}(0,\sigma^2)$ et $Z$ la matrice des variables exogènes.
+
+Soit $T_{B1}$ la date du premier changement structurel et $T_{B2}$ la date du second.
+
+- ”crash” : $Z_t = [\iota, tendance, DU_{1t}, DU_{2t}]'$ avec $DU_{jt} = 1$ si $t≥T_{Bj} + 1$ pour $j=1,2$ et $0$ sinon
+
+- ”break” : $Z_t = [\iota, tendance, DU_{1t}, DU_{2t}, DT_{1t} , DT_{2t}]'$ avec $DT_{jt} = t- T_{Bj}$ si $t≥T_{Bj} + 1$ pour $j=1,2$ et $0$ sinon
+
+
+Pour **"crash"**, nous testons : 
+
+$$
+H0 : y_t = \mu_0 + d_1 B_{1t} + d_2 B_{2t} + y_{t-1} + v_{1t}
+
+VS
+
+Ha : y_t = \mu_1 + \gamma \times trend_t + d_1 D_{1t} + d_2 D_{2t} + v_{2t}
+$$
+
+Pour **"break"**, nous testons : 
+
+$$
+H0 : y_t = \mu_0 + d_1 B_{1t} + d_2 B_{2t} + d_3 D_{1t} + d_4 D_{2t} + y_{t-1} + v_{1t}
+
+VS
+
+Ha : y_t = \mu_1 + \gamma \times trend_t + d_1 D_{1t} + d_2 D_{2t} + d_3 DT_{1t} + d_4 DT_{2t} + v_{2t}
+$$
+
+Notons que dans tous les cas, le PGD comprend des changements structurels sous H0 et sous Ha.
+
+Le test LS peut s’effectuer avec ou sans boostrap. Dans notre cas, nous n’utiliserons pas boostrap car ce
+dernier est employé lorsque nous avons un faible nombre d’observation. Ce qui n'est pas le cas pour notre sére `rtt` (nombre de jour supérieur à 100). 
+
+```{r, echo=FALSE}
+#source("C:\\Users\\mlebreto\\Documents\\gretha\\2020-2021\\M1IREF\\LeeStrazicichUnitRoot-master(2)\\LeeStrazicichUnitRoot-master\\LeeStrazicichUnitRootTest.R")
+source("/Users/alexandra/iref/s3/VaR/LeeStrazicichUnitRoot-master/LeeStrazicichUnitRootTest.R")
+myBreaks <- 1
+myModel <- "crash"
+myLags <- Schwert
+myLS_test <- ur.ls(y=rtt , model = myModel, breaks = myBreaks, lags = myLags, method = "GTOS", pn = 0.1, print.results = "print")
+```
+
+`First possible structural break at position: 348`
+
+Cette position correspond à la date : 
+
+```{r, echo=FALSE}
+dates[348]
+```
+
+> La date de rupture étant le 21 mai 2014, nous nous sommes intéressés à l'actualité de l'époque chez Square Enix. Cette période correspond à un léger creux après les premiers signes de redressement de Square Enix, probablement à la suite de résultats financiers ou d'événements particuliers. Il n'y a pas eu de gros titres ou de jeux majeurs autour de mai 2014, ce qui pourrait indiquer que la baisse est liée à une correction du marché après une montée précédente (comme celle de janvier 2014 évoqué précédemment) ou des attentes moins élevées pour les jeux à venir. Les résultats financiers publiés à cette période auraient pu décevoir, malgré le succès des titres de 2013.
+
+La valeur de la statistique du test est -9.659352 ce qui est inférieur à la valeur critique -3.566. On rejette alors H0 ce qui nous permet de conclure que le PGD qui a généré la série `rtt` et donc il n’y a pas de racine unitaire.
+
+De plus, le PGD ne peut pas être TS puisque nous avons vu qu’il n’y a pas de tendance. **La conclusion est
+que le PGD qui a généré notre série est stationnaire avec une date de rupture en mai 2014**.
+
+# Conclusion
+
+Pour conclure, nous pouvons faire un tableau récapitulatif des résultats pour les 8 caractéristiques de nos séries `rte` et `rtt` :
+
+```{r, echo=FALSE}
+# Créer une matrice avec les données des caractéristiques
+data <- matrix(c(
+  "OUI", "NON",       # Asymétrie perte / gain
+  "OUI P>G", "OUI P=G", # Queues de distribution épaisses
+  "NON", "OUI",       # Autocorrélations des carrés des rendements
+  "OUI", "OUI",       # Clusters de volatilité
+  "OUI", "OUI",       # Queues épaisses conditionnelles
+  "OUI", "OUI",       # Effet de levier
+  "OUI", "OUI",       # Saisonnalité
+  "OUI", "OUI"        # Stationnarité
+), ncol = 2, byrow = TRUE)
+
+# Ajouter les noms des colonnes et des lignes
+colnames(data) <- c("RTE", "RTT")
+rownames(data) <- c(
+  "1. Asymétrie perte / gain",
+  "2. Queues de distribution épaisses",
+  "3. Autocorrélations des carrés des rendements",
+  "4. Clusters de volatilité",
+  "5. Queues épaisses conditionnelles",
+  "6. Effet de levier",
+  "7. Saisonnalité",
+  "8. Stationnarité"
+)
+
+# Afficher le tableau avec kable pour un rendu propre
+kable(data, caption = "Tableau récapitulatif des caractéristiques pour RTE et RTT")
+```
+

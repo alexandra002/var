@@ -1,0 +1,685 @@
+---
+title: "Annexe du projet 2: Backtesting et estimation de la Value at Risk de l'action Square Enix "
+author: "Alexandra"
+date: "2024-11-16"
+output: 
+  rmdformats::readthedown
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(xts)
+library(yfR)
+library(forecast)
+library(moments)
+library(scales)
+library(rugarch)
+library(ghyp)
+library(SkewHyperbolic)
+library(knitr)
+library(kableExtra)
+```
+
+```{r, include = FALSE}
+# my_ticker <- 'SQNXF'      
+# first_date <- "2013-01-01"  
+# last_date <-"2024-10-23"   
+
+# fetch data
+# df_yf <- yf_get(tickers = my_ticker, 
+               #  first_date = first_date,
+               #  last_date = last_date,
+               #  freq_data='daily',
+               #  type_return='log')
+
+#load("/Users/alexandra/iref/s3/VaR/sqnx_data.RData")
+load("/sqnx_data.RData")
+
+pt<-df_yf$price_adjusted
+dpt<-diff(pt)
+datesp<-df_yf$ref_date
+dates<-datesp[-1]
+
+rendement=df_yf$ret_adjusted_prices[-1]
+N<-length(rendement)
+rt<-xts(x=rendement,order.by=dates)
+rte=rendement[1:1761]
+datesrte<-dates[1:1761]
+rtt=rendement[1762:N]
+
+#T<-length(rte)
+#T2<-length(rtt)
+```
+
+**Objectif :** Ce projet a pour but d'évaluer la Value at Risk (VaR) de l'action de Square Enix et d'en vérifier la précision grâce au backtesting.
+
+Pour ce faire, nous chercherons la distribution la plus appropriée pour modéliser les aléas, en utilisant un modèle ARMA-GARCH qui optimisera la moyenne et la volatilité conditionnelles. Nous évaluerons ensuite la performance de ce modèle par des tests de backtesting pour assurer une estimation fiable de la VaR paramétrique. Enfin, nous calculerons d'autres mesures de VaR, notamment la VaR normale, la VaR de Cornish-Fisher et la VaR historique.
+
+# Détermination de la distribution
+
+Nous commençons ici par tracer un **QQ plot** (Quantile-Quantile plot) pour comparer la distribution des données contenues dans rte avec une distribution normale théorique :
+
+```{r, echo=FALSE}
+qqnorm(rte)
+qqline(rte, col = 2)
+```
+
+> La droite en rouge est une droite de référence qui représente l'ajustement parfait à une distribution normale. Elle est tracée de manière à passer par le premier et le troisième quartile des données observées. Tandis que, Les petits cercles représentent les quantiles de nos données réelles (ici, `rte`), c'est-à-dire les valeurs observées dans notre série de données.
+
+On voit sur le graphique a quel point les queues de la distribution sont éloignées de la normale en rouge. Les 2 queues de la distribution sont plus épaisses qu'une loi normale et la queue droite (celle des valeurs positive) est plus lourde que celle de gauche car la distance entre la courbe et la droite est plus importante pour les valeurs fortement positive de `rte` que pour ses valeurs fortement négative.
+
+::: {style="background-color: #FEFBD4; padding: 10px; padding-bottom: 0.1px; margin-bottom: 0; border-radius: 5px;"}
+⚠️ <strong>Attention :</strong> L'estimation des distributions student asymétrique, gaussienne inverse asymétrique, hyperbolique asymétrique ainsi que hyperbolique généralisée asymétrique me renvoie une erreur. Je ne peux donc pas réaliser le graphique *"estimateur par noyau de la densité des rendements et distributions estimées"*.
+
+Suite à cette difficulté, il a été décidé que je teste les 6 distributions pour le premier modèle, à savoir l'APARCH. Celle qui fournira les meilleures estimations pour ce modèle sera ensuite utilisée pour estimer les 5 autres modèles.
+
+**Parmis les 6 distributions testées nous avons :**
+
+-   NIG : Normal Inverse Gaussian Distribution (distribution normale inverse gaussienne)
+
+-   SSTD : Skewed Student-t Distribution (distribution de Student asymétrique)
+
+-   SGED : Skewed Generalized Error Distribution (distribution d'erreur généralisée asymétrique)
+
+-   JSU : Johnson SU Distribution (distribution Johnson SU)
+
+-   GHST : Generalized Hyperbolic Skew Student-t Distribution (distribution hyperbolique généralisée de Student asymétrique)
+
+-   GHYP : Generalized Hyperbolic Distribution (distribution hyperbolique généralisée)
+:::
+
+# Les tests et leurs hypothèses
+
+Pour chacun des modèles, nous effectuerons les tests suivants, avec un seuil de $5 \%$ comme condition d'acceptation :
+
+## Autocorrélation des aléas
+
+Pour tester l'autocorrélation des aléas nous allons utiliser **la statistique de Ljung-Box pondérée** appliquée aux résidus standardisés.
+
+$H0 : \rho_1 = \rho_2 = \rho_3 = ... = \rho_k \quad \Leftrightarrow \quad$ Absence d'autocorrélation jusqu'à l'ordre $k$
+
+$H_a : \rho(k) \neq 0$ pour au moins une valeur de k comprise entre 1 et K $\quad \Leftrightarrow \quad$ Présence d'autocorrélation.
+
+## Homoscédasticité conditionnelle des aléas
+
+Pour tester l'homoscédasticité conditionnelle des aléas nous allons utiliser **la statistique d'Engle** appliquée aux résidus standardisés et ce pour différent retard.
+
+$H0 ∶ \alpha1 = \alpha2 = ... = \alpha m = 0 \quad \Leftrightarrow \quad$ Abscence d'effet ARCH et homoscédasticité conditionnelle
+
+$Ha ∶ \alpha i \neq 0$ avec $i \neq 0 \quad \Leftrightarrow \quad$ Présence d'effet ARCH et hétéroscédasticité conditionnelle.
+
+## Stabilité des paramètres dans le temps
+
+Pour tester la stabilité des paramètres dans le temps nous allons utiliser la statistique de **test de stabilité de Nyblom** :
+
+$H0 :$ Le paramètre est stable dans le temps
+
+$Ha :$ le paramètre varie dans le temps
+
+## L'effet de levier
+
+Pour tester l'effet de levier, nous utiliserons le **test Sign Bias**, qui indique :
+
+S'il existe un effet de levier dans notre $r_t$ est ce que le modèle de la variance conditionnelle choisi l'a pris en compte ? Le test nommé **Sign Bias Test** d'Engle et Ng (1993) est basé sur l'équation suivante :
+
+$$
+\tilde{v}^2_t = c_0 + c_1 I_{\{\tilde{v}_t - 1 <0\}} + c_2 I_{\{\tilde{v}_t - 1 <0\}} \tilde{v}_{t-1}+ c_3 I_{\{\tilde{v}_t - 1 ≥0\}} \tilde{v}_{t-1} + u_t
+$$
+
+où $I$ est une fonction indicatrice qui vaut $1$ si la condition entre les accolades est vérifiée. Ce test comporte 4 hypothèses nulles : la première est la nullité de chaque $c_i$ pour $i=1,2,3$ et la dernière la nullité conjointe des 3 **(Joint Effect)**.
+
+--- Si $c_1$ est significativement différent de $0$ alors il existe un effet signe (un choc $< 0$ et un choc $> 0$ ont un impact différencié sur la volatilité). Dans R, c'est le test nommé **sign Bias** et H0 est pas d'effet signe.
+
+--- Si $c_2$ est significativement différent de $0$ alors il existe un effet taille d'un choc négatif. Cela signifie qu'un petit choc $< 0$ et un grand choc $< 0$ n'ont pas le même impact sur la volatilité Dans R, c'est le test nommé **Negative Sign Bias** et H0 est pas d'effet taille d'un choc $< 0$.
+
+--- Si $c_3$ est significativement différent de $0$ alors il existe un effet taille d'un choc positif. cela signifie qu'un petit choc $> 0$ et un grand choc $> 0$ n'ont pas le même impact sur la volatilité. Dans R, c'est le test nommé **Positive Sign Bias** et H0 est pas d'effet taille d'un choc $> 0$.
+
+--- Si les 3 coefficients sont significatif alors il existe un effet signe et un effet taille des 2 chocs. Dans R, c'est le test nommé **Joint Effect** et H0 est pas d'effet signe ni d'effet taille.
+
+## Goodness-of-fit
+
+Pour tester l'adéquation entre la distribution que nous avons supposé dans la spéciication (distribution.model) et la distrubution empirique des résidus standiardisés nous effectuons le **test d'ajustement de Pearson ajusté** :
+
+$H0 :$ adéquation de la distribution testée avec la distribution donnée.
+
+$Ha :$ les distributions ne sont pas concordante.
+
+# Modèles ARCH,GARCH asymétriques
+
+Ces modèles sont adaptés lorsque l'effet hétéroscédastique diffère selon que l'erreur précédente est positive ou négative. Deux principales approches ont été développées :
+
+-   **Nelson (1991)** : Modèles EGARCH (Exponential Generalized ARCH) pour analyser les évolutions asymétriques de la variance.
+
+-   **Engle et Bollerslev (1986)** : Modèles TGARCH (Threshold GARCH) où la variance, définie par morceaux, varie selon le signe et l'ampleur des chocs.
+
+## Modèle APARCH
+
+Introduit par Ding, Granger et Engle (1993), il est l'un des plus intéressant notamment parce qu'il admet comme cas particuliers plusieurs autres processus existants.
+
+### Formulation
+
+Un processus $v_t$ satisfait une représentation APARCH(m, s) ssi :
+
+$$
+r_t = \mu + v_t, \quad v_t = \sigma_t \varepsilon_t
+$$
+
+$$
+\sigma_t^\delta = \alpha_0 + \sum_{i=1}^s \alpha_i \left( | v_{t-i} | - \gamma_i v_{t-i} \right)^\delta + \sum_{i=1}^m \beta_i \sigma_{t-i}^\delta
+$$
+
+La positivité de $\sigma_t$ est assurée par les conditions :
+
+-   $\alpha_0 > 0$,
+-   $\alpha_i \geq 0$,
+-   $-1 < \gamma_i < 1$, pour $i = 1, \dots, s$,
+-   $\beta_i \geq 0$, pour $i = 1, \dots, m$,
+-   $\delta > 0$. En fait, pour avoir une signification, $\delta$ doit être égal à 1 (écart-type conditionnel) ou 2 (variance conditionnelle).
+
+La stationnarité du second ordre d'un processus APARCH nécessite :
+
+$$
+\sum_{i=1}^s \alpha_i E \left[ \left( | v_{t-i} | - \gamma_i v_{t-i} \right)^\delta \right] + \sum_{i=1}^m \beta_i \sigma_{t-i}^\delta < 1
+$$
+
+**Modèle APARCH(1,1) :**
+
+$$
+r_t = \mu + v_t, \quad v_t = \sigma_t \varepsilon_t
+$$
+
+$$
+\sigma_t^\delta = \alpha_0 + \alpha_1 (|v_{t-1}|-\gamma_1 v_{v-1})^\delta + \beta_1 \sigma^\delta_{t-1}
+$$
+
+### Modèle retenue
+
+Suite à votre email mentionnant l'existence d'une distribution où tous les coefficients du modèle étaient significatifs, j'ai consacré beaucoup de temps à tenter de trouver le modèle que vous décriviez, sans y parvenir. En suivant vos indications, selon lesquelles seuls les paramètres `armaOrder` pouvaient être modifiés et la valeur estimée de $\alpha_1$ pouvait être fixée à $0$, j'ai finalement développé un algorithme (disponible uniquement dans mon fichier R) pour identifier les modèles présentant le moins de coefficients non significatifs.
+
+Ainsi, mon analyse a conduit à comparer :
+
+-   La distribution `ghst` avec des ordres ARMA $(2,2)$, $(2,1)$ et $(0,0)$ ;
+
+-   La distribution `ghyp` avec un ARMA de $(1,1)$.
+
+Pour effectuer mon choix final, j'ai utilisé les critères d'ajustement et d'information, ce qui m'a conduit à retenir le **modèle ARMA(1,1)-APARCH(1,1)** avec une distribution `ghyp`, soit :
+
+```{r}
+spec7b = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                    mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp")
+fit7b= ugarchfit(spec = spec7b, data = rte)
+show(fit7b)
+```
+
+La valeur estimée de $\delta$, égale à $0.676986$, étant plus proche de $1$ que de $2$, je l'ai donc fixée à $1$.
+
+```{r}
+spec7b = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                    mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp",
+                    fixed.pars=list(delta=1))
+fit7b= ugarchfit(spec = spec7b, data = rte)
+show(fit7b)
+```
+
+Ce modèle n'est probablement pas le meilleur, mais c'est le moins mauvais parmi ceux que j'ai testés. En effet, quelle que soit la distribution utilisée (ou le modèle utilisé, d'ailleurs), les p-values du test de Pearson sont égales à $0$, indiquant qu'aucune distribution ne s'ajuste correctement, quelle que soit la configuration de l'ARMA.
+
+En nous basant sur `Robust Standard Errors`, tous les coefficients sont significatifs, mis à part `omega` $\text{(p-value}= 0.097201\text{)}$ et `gamma1` $\text{(p-value}= 0.799572\text{)}$ qui ont des p-values supérieures à $0.05$.
+
+#### • Statistique de Ljung-Box pondérée appliquée aux résidus standardisés
+
+La statistique de Ljung-Box pondérée appliquée aux résidus standardisés montre que les aléas ne sont pas autocorrélés. En effet, les p-values du `Weighted Ljung-Box Test on Standardized Residuals` sont supérieures à $0.05$ ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence d'autocorrélation. Ainsi, ce modèle parvient à capturer toute l'autocorrélation présente dans `rt`.
+
+#### • Statistique d'Engle appliquée aux résidus standardisés et ce pour différent retard
+
+La statistique d'Engle, appliquée aux résidus standardisés pour différents retards, montre que les aléas sont conditionnellement homoscédastiques. En effet, les p-values des `Weighted ARCH LM Tests` sont supérieures à $0.05$, ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence de clusters de volatilité. Cela indique que le modèle a correctement pris en compte tous les clusters de volatilité présents dans `rt`.
+
+#### • Statistique de test de stabilité de Nyblom
+
+Le test de stabilité de Nyblom évalue la stabilité individuelle et conjointe des paramètres du modèle dans le temps. Si la statistique calculée est supérieure à la valeur critique tabulée, l'hypothèse nulle $(H0)$ de stabilité est rejetée.
+
+**• Stabilité conjointe :**
+
+La statistique conjointe calculée $(412.8612)$ dépasse la valeur critique tabulée $(2.54 \text{ à } 5 \%)$, ce qui implique que tous les paramètres ne sont pas simultanément stables dans le temps. L'hypothèse nulle de stabilité conjointe des paramètres est donc rejetée.
+
+**• Stabilité individuelle :**
+
+Une analyse paramètre par paramètre révèle que `mu`, `alpha1`, `beta1`, `shape` et `ghlambda` ne sont pas stables dans le temps. Leurs statistiques individuelles (respectivement $0.95864$, $0.88202$, $0.70814$, $219.60018$ et $0.99487$) sont supérieures à la valeur critique tabulée $(0.47 \text{ à } 5 \%)$. Par conséquent, ces paramètres présentent une instabilité temporelle.
+
+**Nous en concluons que l'hypothèse de stabilité a été rejetée, à la fois pour l'ensemble des paramètres et pour les paramètres spécifiques mentionnés.**
+
+#### • Test Sign Bias
+
+Pour le Sign Bias Test, la p-value de la statistique jointe (effet global) est de $0.1623$, ce qui est supérieur à $0.05$. Cela conduit à accepter l'hypothèse nulle $(H0)$, indiquant qu'il n'y a ni effet de signe ni effet de taille dans les résidus.
+
+#### • Adjusted Pearson Goodness-of-Fit test
+
+Le test Adjusted Pearson Goodness-of-Fit évalue l'adéquation entre la distribution spécifiée dans le modèle (`distribution.model`) et la distribution empirique des résidus standardisés. L'hypothèse nulle correspond à une adéquation parfaite des distributions.
+
+Ici, les $4$ p-values sont égales à $0$ et donc inférieures à $0.05$. Cela conduit à rejeter l'hypothèse nulle $(H0)$, indiquant que la loi normale ne correspond pas à la bonne distribution. Ce résultat est cohérent, car la loi normale est, par défaut, symétrique et mésocurtique, ce qui n'est pas adapté aux caractéristiques des données observées.
+
+**Pour la suite, nous garderons la distribution hyperbolique généralisée pour réaliser les** $5$ modèles restant.
+
+## Modèle GJR-GARCH
+
+### Formulation
+
+$$
+r_t = \mu + v_t, \quad v_t = \sigma_t \varepsilon_t,
+$$
+
+$$
+\sigma_t^2 = \alpha_0 + \sum_{i=1}^m \left( \alpha_i v_{t-i}^2 + \gamma_i I_{t-i}<0 v_{t-i}^2 \right) + \sum_{j=1}^s \beta_j \sigma_{t-j}^2
+$$
+
+où $\epsilon_t$ sont des BB et où $I_{t-i} = 1$ si $v_{t-i} < 0$ et $0$ sinon.
+
+Dans ce modèle, il est utile d'imposer des contraintes sur les paramètres pour satisfaire la condition de positivité de la variance conditionnelle : $\alpha_0 > 0$ et $\alpha_i \geq 0$ pour $i = 1, \dots, m$ et $\beta_j \geq 0$ pour $j = 1, \dots, s$.
+
+**Le modèle GJR-GARCH(1,1)**
+
+$$
+r_t = \mu + v_t, \quad v_t = \sigma_t \varepsilon_t,
+$$
+
+$$
+\sigma_t^2= \left\{{\alpha_0+(\alpha_1+\gamma)v_{t-1}^2 +\beta_1\sigma_{t-1}^2 \quad \text{si } \varepsilon_{t-1}\le0\atop \alpha_0+\alpha_1v_{t-1}^2 +\beta_1\sigma_{t-1}^2 \quad \text{sinon}}\right.
+$$
+
+### Principe
+
+-   La dynamique de la variance conditionnelle admet un changement de régime qui dépend du signe de l'innovation passée.
+-   Afin de prendre en compte la modification d'un coefficient selon la survenue d'un événement, il est courant d'introduire une nouvelle variable explicative construite comme le produit d'une indicatrice de l'évènement en question et de la variable initiale.
+-   Quand on a un choc positif en $t - i$, les effets totaux sont $\alpha_i v_{t-i}^2$ mais quand on a un choc négatif, les effets totaux valent $(\alpha_i + \gamma_i) v_{t-i}^2$.
+-   La présence d'effet de levier implique que les $\gamma$ soient $> 0$.
+
+### Exécution du modèle
+
+Après avoir testé plusieurs combinaisons de modèles avec des ordres de ARMA différents pour obtenir la meilleure estimation, nous avons choisi le modèle **modèle ARMA(2,2)-GJRARCH(1,1)** avec une distribution `ghyp`, soit :
+
+```{r}
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(2,2)),distribution.model="ghyp")
+fit6= ugarchfit(spec = spec6,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+```
+
+En nous basant sur `Robust Standard Errors`, les coefficients `mu`, `alpha1`, `gamma1` et `skew` ne sont pas considérés comme significatifs, car leurs valeurs p sont supérieures à $0.05$. Nous avons donc décidé de fixer $\alpha_1$ à $0$ en utilisant l'argument `fixed.pars`, car il doit être supérieur ou égal à $0$. Cela donne les résultats suivants :
+
+```{r}
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(2,2)),distribution.model="ghyp",
+                   fixed.pars=list(alpha1=0))
+fit6= ugarchfit(spec = spec6,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit6)
+```
+
+En nous appuyant toujours sur `Robust Standard Errors`, nous constatons que seule la skewness ayant une p-value de $0.074$, est légèrement supérieur à $0.05$. Le coefficient $\gamma$ est significatif et positif, ce qui indique que ce modèle prend en compte l'effet de levier.
+
+#### • Statistique de Ljung-Box pondérée appliquée aux résidus standardisés
+
+La statistique de Ljung-Box pondérée appliquée aux résidus standardisés montre que les aléas ne sont pas autocorrélés. En effet, les p-values du `Weighted Ljung-Box Test on Standardized Residuals` sont supérieures à $0.05$ ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence d'autocorrélation. Ainsi, ce modèle parvient à capturer toute l'autocorrélation présente dans `rt`.
+
+#### • Statistique d'Engle appliquée aux résidus standardisés et ce pour différent retard
+
+La statistique d'Engle, appliquée aux résidus standardisés pour différents retards, montre que les aléas sont conditionnellement homoscédastiques. En effet, les p-values des `Weighted ARCH LM Tests` sont supérieures à $0.05$, ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence de clusters de volatilité. Cela indique que le modèle a correctement pris en compte tous les clusters de volatilité présents dans `rt`.
+
+#### • Statistique de test de stabilité de Nyblom
+
+Le test de stabilité de Nyblom évalue la stabilité individuelle et conjointe des paramètres du modèle dans le temps. Si la statistique calculée est supérieure à la valeur critique tabulée, l'hypothèse nulle $(H0)$ de stabilité est rejetée.
+
+**• Stabilité conjointe :**
+
+La statistique conjointe calculée $(413.1058)$ dépasse la valeur critique tabulée $(2.75 \text{ à } 5 \%)$, ce qui implique que tous les paramètres ne sont pas simultanément stables dans le temps. L'hypothèse nulle de stabilité conjointe des paramètres est donc rejetée.
+
+**• Stabilité individuelle :**
+
+Une analyse paramètre par paramètre révèle que `mu`, `omega`, `beta1`, `gamma1`, `shape` et `ghlambda` ne sont pas stables dans le temps. Leurs statistiques individuelles (respectivement $0.69280$, $2.04106$, $1.83098$, $1.41006$, $251.65287$ et $0.90784$) sont supérieures à la valeur critique tabulée $(0.47 \text{ à } 5 \%)$. Par conséquent, ces paramètres présentent une instabilité temporelle.
+
+**Nous en concluons que l'hypothèse de stabilité a été rejetée, à la fois pour l'ensemble des paramètres et pour les paramètres spécifiques mentionnés.**
+
+#### • Test Sign Bias
+
+Pour le test du biais de signe, nous commençons par analyser la p-value de la statistique conjointe (effet joint). Sa p-value est de $1.475e-10$, ce qui est inférieur à $0.05$. Nous rejetons donc l'hypothèse nulle $(H0)$, ce qui signifie qu'il y a un effet significatif, soit d'un des deux facteurs, soit des deux.
+
+Ensuite, nous examinons la p-value de la statistique du signe du biais. Celle-ci est de $1.560e-05$, également inférieure à $0.05$, ce qui conduit au rejet de l'hypothèse nulle $(H0)$. Cela indique que l'impact d'un choc positif sur la volatilité du rendement diffère de celui d'un choc négatif.
+
+Enfin, la p-value de la statistique associée aux effets taille des chocs négatifs est supérieure à $0.05$, ce qui signifie qu'il n'y a pas d'effet significatif pour un choc négatif au seuil de $5\%$. En revanche, la p-value de la statistique liée aux effets taille des chocs positifs est inférieure à $0.05$, ce qui indique un effet significatif pour un choc positif.
+
+#### • Adjusted Pearson Goodness-of-Fit test
+
+Le test Adjusted Pearson Goodness-of-Fit évalue l'adéquation entre la distribution spécifiée dans le modèle (`distribution.model`) et la distribution empirique des résidus standardisés. L'hypothèse nulle correspond à une adéquation parfaite des distributions.
+
+Ici, les $4$ p-values sont égales à $0$ et donc inférieures à $0.05$. Cela conduit à rejeter l'hypothèse nulle $(H0)$, indiquant que la loi normale ne correspond pas à la bonne distribution. Ce résultat est cohérent, car la loi normale est, par défaut, symétrique et mésocurtique, ce qui n'est pas adapté aux caractéristiques des données observées.
+
+## Modèle EGARCH(m,s)
+
+### Formulation
+
+Les équations du modèle EGARCH(m,s) sont :
+
+$$
+v_t = \sigma_t \varepsilon_t
+$$ 
+
+$$
+ln(\sigma_t^2) = \alpha_0 + \frac{1+\beta_1L +... + \beta_{s-1}L^{s-1}}{1-\alpha_1L-...-\alpha_mL^m}g(\varepsilon_{t-1})
+$$ $$
+g(\varepsilon_t)=\theta\varepsilon_t + \gamma[|\varepsilon_t| - \mathbb{E}(|\varepsilon_t|)]
+$$ où $\theta$ et $\gamma$ sont des constantes réelles et $L$ est un opérateur de retard : $L\varepsilon_t = \varepsilon_{t-1}$ et $L^2\varepsilon_t = \varepsilon_{t-2}$, et $|\varepsilon_t| - \text{E}(|\varepsilon_t|)$ sont des séquences i.i.d. avec des distributions continues et sont de moyenne nulle. Donc $\text{E}[g(\varepsilon_t)]=0$.
+
+-   Ce modèle autorise une forme d'asymétrie qui dépend :
+
+    -   du signe positif ou négatif de l'innovation $(\theta)$,
+    -   de l'amplitude de ce choc $(\gamma)$.
+
+\newline
+
+-   Par ailleurs, il présente aussi l'avantage de ne nécessiter aucune restriction de non négativité sur les paramètres afon de garantir la positivité de la variancce conditionnelle.
+
+Dans le package `rugarch` le modèle EGARCH(m,s) se réécrit :
+
+$$
+v_t = \sigma_t\varepsilon_t
+$$ 
+
+$$
+ln(\sigma_t^2) = \alpha_0 + \sum_{i=1}^s \alpha_i \frac{|\varepsilon_{t-i}| + \gamma_i\varepsilon_{t-i}}{\sigma_{t-i}} + \sum_{i=1}^m \beta_jln(\sigma_{t-j}^2)
+$$
+
+### Propriétés
+
+L'équation de la formulation utilise la paramétrisation ARMA pour décrire l'évolution de la variance conditionnelle de $v_t$. Cette représentation nous permet d'obtenir les propriétés suivantes du modèle EGARCH :
+
+1.  La moyenne non conditionnelle de $ln(\sigma^2_t) = \alpha_0$
+
+2.  Il utilise le logarithme de la variance conditionnelle afin de relaxer la contrainte de positivité des coefficients
+
+L'assymétrie de $g(\epsilon_t)$ peut se réecrire comme suit :
+
+<center>$$ g(\varepsilon_t)= \left\{{(\theta+\gamma)\varepsilon_t - \gamma \text{E}(|\varepsilon|) \quad \text{ si } \varepsilon \geq 0 \text{ i.e. si bonne nouvelle} \atop (\theta-\gamma)\varepsilon_t - \gamma \text{E}(|\varepsilon|) \quad \text{sinon i.e. mauvaise nouvelle}}\right. $$</center>
+
+-   Pour $\varepsilon_t \sim \text{N, E}(|\varepsilon_t|) = \sqrt{2/\pi} = 0.7979$
+
+-   Pour $\varepsilon_t \sim t(v)\text{, E}(|\varepsilon_t|) = \frac{2\sqrt{v-2}\Gamma((v+1)/2)}{(v-1)\Gamma(v/2)\sqrt{\pi}}$
+
+### Exécution du modèle
+
+Après avoir testé plusieurs combinaisons de modèles avec des ordres de ARMA différents pour obtenir la meilleure estimation, nous avons choisi le modèle **modèle ARMA(1,1)-EGARCH(1,1)** avec une distribution `ghyp`, soit :
+
+```{r}
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp")
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+Seul, `alpha1` n'est pas significatif, c'est pourquoi nous le fixons à $0$.
+
+```{r}
+spec5B = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                    mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp",
+                    fixed.pars=list(alpha1=0))
+fit5B = ugarchfit(spec = spec5B, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5B)
+```
+
+Nous obtenons l'ensemble des coefficients significatifs.
+
+#### • Statistique de Ljung-Box pondérée appliquée aux résidus standardisés
+
+La statistique de Ljung-Box pondérée appliquée aux résidus standardisés montre que les aléas ne sont pas autocorrélés. En effet, les p-values du `Weighted Ljung-Box Test on Standardized Residuals` sont supérieures à $0.05$ ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence d'autocorrélation. Ainsi, ce modèle parvient à capturer toute l'autocorrélation présente dans `rt`.
+
+#### • Statistique d'Engle appliquée aux résidus standardisés et ce pour différent retard
+
+La statistique d'Engle, appliquée aux résidus standardisés pour différents retards, montre que les aléas sont conditionnellement homoscédastiques. En effet, les p-values des `Weighted ARCH LM Tests` sont supérieures à $0.05$, ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence de clusters de volatilité. Cela indique que le modèle a correctement pris en compte tous les clusters de volatilité présents dans `rt`.
+
+#### • Statistique de test de stabilité de Nyblom
+
+Le test de stabilité de Nyblom évalue la stabilité individuelle et conjointe des paramètres du modèle dans le temps. Si la statistique calculée est supérieure à la valeur critique tabulée, l'hypothèse nulle $(H0)$ de stabilité est rejetée.
+
+**• Stabilité conjointe :**
+
+La statistique conjointe calculée $(408.1115)$ dépasse la valeur critique tabulée $(2.32 \text{ à } 5 \%)$, ce qui implique que tous les paramètres ne sont pas simultanément stables dans le temps. L'hypothèse nulle de stabilité conjointe des paramètres est donc rejetée.
+
+**• Stabilité individuelle :**
+
+Une analyse paramètre par paramètre révèle que `mu`, `omega`, `beta1`, `gamma1`, `shape` et `ghlambda` ne sont pas stables dans le temps. Leurs statistiques individuelles (respectivement $1.0057$, $0.9260$, $0.8551$, $0.7274$, $199.5873$ et $0.7105$) sont supérieures à la valeur critique tabulée $(0,47 \text{ à } 5 \%)$. Par conséquent, ces paramètres présentent une instabilité temporelle.
+
+**Nous en concluons que l'hypothèse de stabilité a été rejetée, à la fois pour l'ensemble des paramètres et pour les paramètres spécifiques mentionnés.**
+
+#### • Test Sign Bias
+
+Pour le Sign Bias Test, la p-value de la statistique jointe (effet global) est de $0.2941$, ce qui est supérieur à $0.05$. Cela conduit à accepter l'hypothèse nulle $(H0)$, indiquant qu'il n'y a ni effet de signe ni effet de taille dans les résidus.
+
+#### • Adjusted Pearson Goodness-of-Fit test
+
+Le test Adjusted Pearson Goodness-of-Fit évalue l'adéquation entre la distribution spécifiée dans le modèle (`distribution.model`) et la distribution empirique des résidus standardisés. L'hypothèse nulle correspond à une adéquation parfaite des distributions.
+
+Ici, les $4$ p-values sont égales à $0$ et donc inférieures à $0.05$. Cela conduit à rejeter l'hypothèse nulle $(H0)$, indiquant que la loi normale ne correspond pas à la bonne distribution. Ce résultat est cohérent, car la loi normale est, par défaut, symétrique et mésocurtique, ce qui n'est pas adapté aux caractéristiques des données observées.
+
+# Modèles ARCH,GARCH symétriques
+
+## Modèle IGARCH
+
+### Propriétés
+
+Les équations du modèle IGARCH(1,1) sont :
+
+$$
+v_t = \sigma_t\varepsilon_t 
+$$
+
+$$
+\sigma_t^2 = \alpha_0 + \beta_1\sigma_{t-1}^2 + (1-\beta_1)v_{t-1}^2
+$$
+
+où $0<\beta_1<1$
+
+En théorie, les phénomènes IGARCH sont causés par des changements occasionnels dans le niveau de la volatilité. Quand $\alpha_1 + \beta_1 = 1$, des substitutions répétées dans les équations précédentes donne :
+
+$$
+\sigma^2_h(l) = \sigma^2_h(1) + (l-1)\alpha_0, \quad l>1
+$$
+
+-   L'effet de $\sigma^2_h(1)$ sur les volatilités futures et persistent et les prévisions de la volatilité forment une ligne droite de pente $\alpha_0$.
+
+-   Si $\alpha_0=0$ dans un modèle IGARCH(1,1), alors quels que soient les horizons de prévisions retenus, ils sont tous égaux à $\sigma^2_h(1)$.
+
+### Exécution du modèle
+
+Après avoir testé plusieurs combinaisons de modèles avec des ordres de ARMA différents pour obtenir la meilleure estimation, nous avons choisi le modèle **modèle ARMA(2,2)-IGARCH(1,1)** avec une distribution `ghyp`, soit :
+
+```{r}
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(2,2)),distribution.model="ghyp")
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+En nous basant sur `Robust Standard Errors`, seul `omega` correspondant à $\alpha_0$ n'est pas significatif, avec une p-value de $0.063225$, qui est légèrement supérieure à $0.05$.
+
+#### • Statistique de Ljung-Box pondérée appliquée aux résidus standardisés
+
+La statistique de Ljung-Box pondérée appliquée aux résidus standardisés montre que les aléas ne sont pas autocorrélés. En effet, les p-values du `Weighted Ljung-Box Test on Standardized Residuals` sont supérieures à $0.05$ ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence d'autocorrélation. Ainsi, ce modèle parvient à capturer toute l'autocorrélation présente dans `rt`.
+
+#### • Statistique d'Engle appliquée aux résidus standardisés et ce pour différent retard
+
+La statistique d'Engle, appliquée aux résidus standardisés pour différents retards, montre que les aléas sont conditionnellement homoscédastiques. En effet, les p-values des `Weighted ARCH LM Tests` sont supérieures à $0.05$, ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence de clusters de volatilité. Cela indique que le modèle a correctement pris en compte tous les clusters de volatilité présents dans `rt`.
+
+#### • Statistique de test de stabilité de Nyblom
+
+Le test de stabilité de Nyblom évalue la stabilité individuelle et conjointe des paramètres du modèle dans le temps. Si la statistique calculée est supérieure à la valeur critique tabulée, l'hypothèse nulle $(H0)$ de stabilité est rejetée.
+
+**• Stabilité conjointe :**
+
+La statistique conjointe calculée $(365.3338)$ dépasse la valeur critique tabulée $(2.54 \text{ à } 5 \%)$, ce qui implique que tous les paramètres ne sont pas simultanément stables dans le temps. L'hypothèse nulle de stabilité conjointe des paramètres est donc rejetée.
+
+**• Stabilité individuelle :**
+
+Une analyse paramètre par paramètre révèle que `mu`, `alpha1`, `shape` et `ghlambda` ne sont pas stables dans le temps. Leurs statistiques individuelles (respectivement $0.92778$, $0.56401$, $231.06174$ et $0.95716$) sont supérieures à la valeur critique tabulée $(0.47 \text{ à } 5 \%)$. Par conséquent, ces paramètres présentent une instabilité temporelle.
+
+**Nous en concluons que l'hypothèse de stabilité a été rejetée, à la fois pour l'ensemble des paramètres et pour les paramètres spécifiques mentionnés.**
+
+#### • Test Sign Bias
+
+Pour le test du biais de signe, nous commençons par examiner la p-value de la statistique conjointe (effet global). Sa p-value est de $0.00752$, ce qui est inférieur à $0.05$. Nous rejetons donc l'hypothèse nulle $(H0)$, ce qui indique qu'il existe un effet, soit d'un des deux facteurs, soit des deux.
+
+Nous analysons ensuite la p-value de la statistique du signe du biais. Celle-ci est de $0.02357$, également inférieure à $0.05$, ce qui nous conduit à rejeter l'hypothèse nulle. Cela signifie qu'un choc positif n'a pas le même impact sur la volatilité du rendement qu'un choc négatif.
+
+Enfin, la p-value de la statistique concernant les effets taille des chocs positifs est supérieure à $0.05$, ce qui suggère qu'il n'y a pas d'effet significatif pour un choc positif au seuil de $5\%$. En revanche, la p-value associée aux effets taille des chocs négatifs est inférieure à $0.05$, indiquant un effet significatif pour un choc négatif.
+
+#### • Adjusted Pearson Goodness-of-Fit test
+
+Le test Adjusted Pearson Goodness-of-Fit évalue l'adéquation entre la distribution spécifiée dans le modèle (`distribution.model`) et la distribution empirique des résidus standardisés. L'hypothèse nulle correspond à une adéquation parfaite des distributions.
+
+Ici, les $4$ p-values sont égales à $0$ et donc inférieures à $0.05$. Cela conduit à rejeter l'hypothèse nulle $(H0)$, indiquant que la loi normale ne correspond pas à la bonne distribution. Ce résultat est cohérent, car la loi normale est, par défaut, symétrique et mésocurtique, ce qui n'est pas adapté aux caractéristiques des données observées.
+
+## Modèle ARCH-M
+
+### Propriétés
+
+Quand le rendement d'un titre peut dépendre de sa volatilité, on considère un modèle GARCH-M tel qu'un GARCH(1,1)-M :
+
+$$
+r_t = \mu + c\sigma^2_t + v_t, \quad v_t = \sigma_t\varepsilon_t
+$$
+
+$$
+\sigma^2_t = \alpha_0 + \alpha_1 v^2_{t-1} + \beta_1 \sigma^2_{t-1}
+$$
+
+où $\mu$ et $c$ sont des constantes. $c$ est appelé le paramètre de prime de risque. Si $c > 0$ alors le rendement est positivement relié à sa volatilité.
+
+D'autres spécifications de la prime de risque ont été employées :
+
+-   $r_t = \mu + c \sigma_t + v_t$
+
+-   $r_t = \mu + c \ln(\sigma^2_t) +v_t$
+
+Les premières équations impliquent que les rendements sont corrélés car le processus de volatilité $\{\sigma^2_t\}$ l'est aussi. L'existence d'une prime de risque est donc une autre source d'autocorrélations dans la série des rendements.
+
+### Exécution du modèle
+
+Après avoir testé plusieurs combinaisons de modèles avec des ordres de ARMA différents pour obtenir la meilleure estimation, nous avons choisi le modèle **modèle ARMA(2,3)-ARCH-M(1,1)** avec une distribution `ghyp`, soit :
+
+```{r, warning=FALSE}
+spec3 = ugarchspec(mean.model=list(armaOrder=c(2,3),archm=TRUE),distribution.model="ghyp")
+fit3 = ugarchfit(spec = spec3,data = rt,out.sample=length(rtt),solver="hybrid")
+fit3
+```
+
+Le coefficient `archm`, qui dans la formule du modèle correspond à $c$ le paramètre de prime de risque n'est pas significatif donc ce modèle n'est pas adéquat pour nos données.
+
+## Modèle GARCH(m,s)
+
+### Formulation
+
+$$
+v_t = \sigma_t \varepsilon_t, \quad \sigma_t^2 = \alpha_0 + \sum_{i=1}^{m} \alpha_i v_{t-i}^2 + \sum_{j=1}^{s} \beta_j \sigma_{t-j}^2
+$$
+
+où $\{\varepsilon_t\} \sim iid(0,1), \alpha_0 > 0, \alpha_i \geq 0, \beta_j \geq 0$ et $\sum_{i=1}^{\max(m,s)} (\alpha_i + \beta_i) < 1$.
+
+-   La contrainte sur $\alpha_i + \beta_i$ implique que la variance non conditionnelle de $v_t$ est finie et que sa variance conditionnelle varie dans le temps.
+
+-   Si on note $\eta_t = v_t^2 - \sigma_t^2$, alors $\sigma_t^2 = v_t^2 - \eta_t$ et $\sigma_{t-i}^2 = v_{t-i}^2 - \eta_{t-i}$ pour $i = 0, \dots, s$, et l'équation précédente se réécrit comme un ARMA pour la série $v_t^2$ :
+
+    $$
+     v_t^2 = \alpha_0 + \sum_{i=1}^{\max(m,s)} (\alpha_i + \beta_i) v_{t-i}^2 + \eta_t - \sum_{j=1}^{s} \beta_j \eta_{t-j}
+    $$
+
+-   La variance non conditionnelle de $v_t^2$ est $E(v_t^2) = \frac{\alpha_0}{1 - \sum_{i=1}^{\max(m,s)} (\alpha_i + \beta_i)}$.
+
+### Propriétés
+
+$$
+v_t = \sigma_t\varepsilon_t, \quad \sigma^2_t = \alpha_0 + \alpha_1 v^2_{t-1} + \beta_1 \sigma^2_{t-1}
+$$
+
+avec $\alpha_1 \geq 0$, $\beta_1 \leq 1$ et $(\alpha_1 + \beta_1) < 1$.
+
+-   Si $v_{t-1}^2$ ou $\sigma_{t-1}^2$ est grande, alors $\sigma_t^2$ est grande. Donc une forte valeur de $v_{t-1}^2$ tend à être suivie d\'une autre forte valeur de $v_t^2$.
+
+-   Si $1 - 2\alpha_1^2 - (\alpha_1 + \beta_1)^2 > 0$, alors :
+
+$$
+\frac{E(v_t^4)}{E(v_t^2)^2} = \frac{3[1 - (\alpha_1 + \beta_1)^2]}{(1 - (\alpha_1 + \beta_1)^2 - 2\alpha_1^2)} > 3
+$$
+
+Donc les queues de la distribution d\'un GARCH(1,1) sont plus épaisses que celles d\'une normale.
+
+### Exécution du modèle
+
+```{r}
+spec2 = ugarchspec(distribution.model="ghyp")
+fit2 = ugarchfit(spec = spec2, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit2)
+```
+
+En nous basant sur `Robust Standard Errors`, les coefficients `mu`, `ar1`, `ma1`, `alpha1` et `skew` ne sont pas significatifs, leurs p-values étant supérieures à $0.05$.
+
+#### • Statistique de Ljung-Box pondérée appliquée aux résidus standardisés
+
+La statistique de Ljung-Box pondérée appliquée aux résidus standardisés montre que les aléas ne sont pas autocorrélés. En effet, les p-values du `Weighted Ljung-Box Test on Standardized Residuals` sont supérieures à $0.05$ ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence d'autocorrélation. Ainsi, ce modèle parvient à capturer toute l'autocorrélation présente dans `rt`.
+
+#### • Statistique d'Engle appliquée aux résidus standardisés et ce pour différent retard
+
+La statistique d'Engle, appliquée aux résidus standardisés pour différents retards, montre que les aléas sont conditionnellement homoscédastiques. En effet, les p-values des `Weighted ARCH LM Tests` sont supérieures à $0.05$, ce qui conduit à accepter l'hypothèse nulle $(H0)$ d'absence de clusters de volatilité. Cela indique que le modèle a correctement pris en compte tous les clusters de volatilité présents dans `rt`.
+
+#### • Statistique de test de stabilité de Nyblom
+
+Le test de stabilité de Nyblom évalue la stabilité individuelle et conjointe des paramètres du modèle dans le temps. Si la statistique calculée est supérieure à la valeur critique tabulée, l'hypothèse nulle $(H0)$ de stabilité est rejetée.
+
+**• Stabilité conjointe :**
+
+La statistique conjointe calculée $(409.0778)$ dépasse la valeur critique tabulée $(2.32 \text{ à } 5 \%)$, ce qui implique que tous les paramètres ne sont pas simultanément stables dans le temps. L'hypothèse nulle de stabilité conjointe des paramètres est donc rejetée.
+
+**• Stabilité individuelle :**
+
+Une analyse paramètre par paramètre révèle que `omega`, `alpha1`, `beta1`, `shape` et `ghlambda` ne sont pas stables dans le temps. Leurs statistiques individuelles (respectivement $5.0533$, $2.0848$, $1.7405$, $244.1345$ et $0.8185$) sont supérieures à la valeur critique tabulée $(0.47 \text{ à } 5 \%)$. Par conséquent, ces paramètres présentent une instabilité temporelle.
+
+**Nous en concluons que l'hypothèse de stabilité a été rejetée, à la fois pour l'ensemble des paramètres et pour les paramètres spécifiques mentionnés.**
+
+#### • Test Sign Bias
+
+Pour le Sign Bias Test, la p-value de la statistique jointe (effet global) est de $0.1623$, ce qui est supérieur à $0.05$. Cela conduit à accepter l'hypothèse nulle $(H0)$, indiquant qu'il n'y a ni effet de signe ni effet de taille dans les résidus.
+
+#### • Adjusted Pearson Goodness-of-Fit test
+
+Le test Adjusted Pearson Goodness-of-Fit évalue l'adéquation entre la distribution spécifiée dans le modèle (`distribution.model`) et la distribution empirique des résidus standardisés. L'hypothèse nulle correspond à une adéquation parfaite des distributions.
+
+Ici, les $4$ p-values sont égales à $0$ et donc inférieures à $0.05$. Cela conduit à rejeter l'hypothèse nulle $(H0)$, indiquant que la loi normale ne correspond pas à la bonne distribution. Ce résultat est cohérent, car la loi normale est, par défaut, symétrique et mésocurtique, ce qui n'est pas adapté aux caractéristiques des données observées.
+
+# Choix du meilleur modèle
+
+```{r, echo=FALSE}
+# Créer une matrice avec les données des caractéristiques
+data <- matrix(c(
+  "×","×","✓","×","×","×",
+  "✓","✓","✓","✓","✓","✓",
+  "✓","✓","✓","✓","✓","✓",
+  "×","×","×","×","×","×",
+  "✓","×","✓","×","×","✓",
+  "×","×","×","×","×","×",
+  "-6.0190","-5.9769","-6.0086","-5.8529","-5.9727","-5.9896"
+), ncol = 6, byrow = TRUE)
+
+# Ajouter les noms des colonnes et des lignes
+colnames(data) <- c("ARMA(1,1)-APARCH(1,1)", "ARMA(2,2)-GJRARCH(1,1)", "ARMA(1,1)-EGARCH(1,1)", "ARMA(2,2)-IGARCH(1,1) ", "ARMA(2,3)-ARCH-M(1,1) ", "GARCH")
+rownames(data) <- c(
+  "Significativité des coefficients",
+  "Ljung-Box Tests",
+  "ARCH LM Tests",
+  "Nyblom stability test",
+  "Sign Bias Test",
+  "Adjusted Pearson Goodness-of-Fit Test",
+  "BIC"
+)
+
+# Afficher le tableau avec kable pour un rendu propre
+kable(data, caption = "Tableau récapitulatif des résultats des tests pour les 6 modèles avec la valeur du BIC pour chacun d'eux")
+```
+
+Le modèle **modèle ARMA(1,1)-EGARCH(1,1)** se distingue des autres par le nombre de tests validés, la significativité de ses coefficients, ainsi que par sa valeur de BIC, qui est l'une des meilleures, comparable à celle du modèle APARCH.
+
+**Le modèle sélectionné pour la suite de notre projet est le modèle modèle ARMA(1,1)-EGARCH(1,1) avec une distribution hyperbolique généralisée.**

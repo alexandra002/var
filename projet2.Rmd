@@ -1,0 +1,521 @@
+---
+title: "PROJET 2 : Backtesting et estimation de la Value at Risk de l'action Square Enix "
+author: "Alexandra"
+date: "2024-11-16"
+output: 
+  rmdformats::readthedown
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(xts)
+library(yfR)
+library(forecast)
+library(moments)
+library(scales)
+library(rugarch)
+library(parallel)
+library(zoo)
+library(knitr)
+
+library(ghyp)
+library(SkewHyperbolic)
+library(PerformanceAnalytics)
+```
+
+```{r, include = FALSE}
+# my_ticker <- 'SQNXF'      
+# first_date <- "2013-01-01"  
+# last_date <-"2024-10-23"   
+
+# fetch data
+# df_yf <- yf_get(tickers = my_ticker, 
+               #  first_date = first_date,
+               #  last_date = last_date,
+               #  freq_data='daily',
+               #  type_return='log')
+
+load("/Users/alexandra/iref/s3/VaR/sqnx_data.RData")
+
+pt<-df_yf$price_adjusted
+dpt=diff(pt)
+datesp<-df_yf$ref_date
+dates<-datesp[-1]
+
+rendement=df_yf$ret_adjusted_prices[-1]
+N<-length(rendement)
+rt<-xts(x=rendement,order.by=dates)
+rte=rendement[1:1761]
+datesrte<-dates[1:1761]
+rtt=rendement[1762:N]
+```
+
+**Objectif :** Ce projet vise à évaluer la Value at Risk (VaR) de l’action de Square Enix, c’est-à-dire la perte maximale potentielle pouvant être atteinte avec une probabilité donnée sur un horizon temporel défini. Square Enix est une société japonaise spécialisée dans le développement et l’édition de jeux vidéo ainsi que de mangas.
+
+L’étude porte sur les rendements logarithmiques de l’action, divisés en deux sous-ensembles distincts :
+
+- Une période d’estimation (du 1ᵉʳ janvier 2013 au 29 décembre 2019), appelée `rte`, utilisée pour le calcul de la VaR.
+
+- Une période de validation (du 1ᵉʳ janvier 2020 au 23 octobre 2023), appelée `rtt`,utilisée pour tester l’estimation.
+
+Dans le projet précédent, bien que les deux sous-ensembles de données aient présenté des caractéristiques similaires, des différences importantes ont été observées, notamment en termes d’asymétrie pertes/gains et d’autocorrélations des carrés des rendements.
+
+Pour ce projet, nous commencerons par déterminer la VaR conditionnelle après avoir sélectionné le modèle ARMA-GARCH le mieux adapté à nos données. Ensuite, nous calculerons plusieurs types de VaR :
+
+- VaR normale,
+
+- VaR de Cornish-Fisher,
+
+- VaR obtenue par simulations historiques.
+
+Enfin, nous effectuerons un **backtesting** pour comparer les VaR estimées aux pertes réelles et ainsi évaluer la pertinence de nos estimations.
+
+---
+
+# VaR conditionnelle : modèle ARMA-GARCH
+
+## Modèle sélectionné
+
+Après avoir examiné plusieurs modèles, dont les détails sont disponibles en annexe, nous avons choisi de retenir le modèle ARMA(1,1)-EGARCH(1,1) avec une distribution hyperbolique généralisée :
+
+```{r}
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp")
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+Seul, `alpha1` n'est pas significatif, c'est pourquoi nous le fixons à $0$.
+
+```{r}
+spec5B = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                    mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp",
+                    fixed.pars=list(alpha1=0))
+fit5B = ugarchfit(spec = spec5B, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5B)
+```
+
+Tous les coefficients sont significatifs. Pour consulter l'analyse détaillée de chaque test statistique, veuillez vous référer à l'annexe, où sont répertoriés l'ensemble des tests réalisés avec leurs hypothèses, ainsi que les modèles testés et analysés, ainsi que la démarche de sélection du meilleur modèle et sa justification. Mais pour rappel : 
+
+```{r, echo=FALSE}
+# Créer une matrice avec les données des caractéristiques
+data <- matrix(c(
+  "✓",
+  "✓",
+  "✓",
+  "×",
+  "✓",
+  "×",
+  "-6.0086"
+), ncol = 1, byrow = TRUE)
+
+# Ajouter les noms des colonnes et des lignes
+colnames(data) <- c("ARMA(1,1)-EGARCH(1,1)")
+rownames(data) <- c(
+  "Significativité des coefficients",
+  "Ljung-Box Tests",
+  "ARCH LM Tests",
+  "Nyblom stability test",
+  "Sign Bias Test",
+  "Adjusted Pearson Goodness-of-Fit Test",
+  "BIC"
+)
+
+# Afficher le tableau avec kable pour un rendu propre
+kable(data, caption = "Tableau récapitulatif des résultats des tests pour le modèles ARMA(1,1)-EGARCH(1,1) avec sa valeur du BIC associée")
+```
+
+## Estimation de la VaR conditionnelle
+
+```{r, echo=FALSE}
+# Calculate the number of cores
+no_cores <- detectCores() - 1
+
+# Initiate cluster
+cl <- makeCluster(no_cores)
+
+specbest = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                      mean.model=list(armaOrder=c(1,1)),distribution.model="ghyp",
+                      fixed.pars=list(alpha1=0))
+
+roll=ugarchroll(specbest, data=rt,n.ahead=1, forecast.length=length(rtt),
+                refit.every=1,refit.window="moving", solver = "hybrid",
+                cluster=cl,fit.control = list(),calculate.VaR=TRUE,
+                VaR.alpha=0.05,keep.coef = TRUE)
+                
+stopCluster(cl)
+
+valueatrisk<-zoo(roll@forecast$VaR[,1])
+reelles<-zoo(roll@forecast$VaR[,2])#=rtt
+index<-rownames(roll@forecast$VaR)
+```
+
+```{r, echo=FALSE}
+plot(dates[1762:N],reelles,type='b',xlab="Dates",ylab="Rendements et VaR")
+lines(dates[1762:N],valueatrisk,type='l',col="red")
+legend("topright",inset=.05,c("rt","VaR"),col=1:2,lty=c(1,1))
+```
+
+**• Données :**
+
+- **Points noirs :** Représentent les rendements journaliers de l'actif, noté `rt`.
+
+- **Lignes verticales noires :** Montrent l'amplitude des rendements par rapport à la moyenne.
+
+- **Ligne rouge :** Représente la VaR de l'actif, calculée à un niveau de confiance de $95 \%$.
+
+**• Observations :**
+
+Les rendements de l'actif fluctuent autour de $0$ avec une tendance visuellement stable, mais des périodes de plus forte volatilité (pointes dans les rendements) sont visibles, notamment en 2020. 
+
+La VaR reste globalement stable au fil du temps, bien qu'elle montre une légère hausse au cours des derniers mois. Après 2021, elle semble toutefois suivre une tendance légèrement à la baisse, ce qui pourrait refléter une réduction du risque maximal estimé. On observe également que les rendements dépassent parfois la VaR en valeur absolue, ce qui correspond à des pertes excédant le seuil prévu (violation de la VaR). Ces dépassements peuvent révéler des événements de risque extrême ou une sous-estimation de la VaR.
+
+# VaR Normale
+
+On va maintenant implémenter la VaR issue de la loi normale.
+
+Tout d'abord, introduisons les notations: on note $\Delta p_t$ la variation de prix entre l'instant initial et l'instant $t$ :
+
+$$
+\Delta p_t = p_t - p_0
+$$
+
+On choisit de calculer la VaR avec une probabilité de 95% (5 dépassements de la VaR tous les 100 jours), la VaR de PARA pour la durée $t$ est le montant tel que la variation $\Delta p_t$ observée pour l'actif durant l’intervalle $[0; t]$ ne sera inférieur à la VaR qu’avec une probabilité de 5% :
+
+$$
+\mathbb{P}(\Delta p_t \leq VaR_{95\%}) = 5\%
+$$
+
+On peut écrire la VaR comme : 
+
+$$
+VaR_q = \mathbb{E}[\Delta p_t] - \Phi^{-1}(q)\sigma_{\Delta p_t}
+$$
+
+où $\mathbb{E}[\Delta p_t]$ est l'espérance des variations des prix, $\sigma_{\Delta p_t}$ la volatilité de la variation des prix et $\Phi^{-1}$ la fonction quantile de la loi normale centrée réduite.
+
+La VaR normale présente d'importantes limitations. Elle ne tient pas compte de plusieurs caractéristiques essentielles des données financières, telles que l'asymétrie, les queues épaisses, l'autocorrélation, les clusters de volatilité ou encore les effets de levier. De plus, elle ignore les phénomènes de saisonnalité.
+
+Bien qu'elle modélise la stationnarité et les queues épaisses conditionnelles, son approche reste simplifiée et incomplète pour capturer la complexité des comportements réels des marchés financiers.
+
+```{r}
+VaRNorm = VaR(rte, p=.95, method="gaussian")
+VaRNorm
+```
+
+La VaR obtenue est $-0.03770178$, ce qui correspond à une perte potentielle de $3,77 \%$ sur une journée, avec une probabilité de $95 \%$.
+
+La valeur du cours de l’action à la dernière date de l’estimation est : 
+
+```{r}
+pt[1761] 
+```
+
+Pour obtenir la perte potentielle maximale en dollars américains (USD) :
+
+$$
+\text{VaR absolue}= \text{VaR relative} \times \text{Dernière valeur du cours} = -0.03770178 \times 47.11024 = -1.77614 \$
+$$
+
+Avec une probabilité de $95 \%$, la perte maximale anticipée pour une action Square Enix sur une journée est d’environ $1.776 \$$. Cela signifie que si vous détenez une seule action, vous ne devriez pas perdre plus de $1.776 \$$ le lendemain dans $95 \%$ des cas.
+
+```{r, echo=FALSE}
+polycurve <- function(x, y, base.y = min(y), ...) {
+  polygon(x = c(min(x), x, max(x)), y = c(base.y, y, base.y), ...)
+}
+
+plotPremierGraphique <- function() {
+  plot(0, 0, type = "n", xlim = c(-4, 4), ylim = c(0, 0.4), xlab="", ylab="")
+  p <- 0.05
+  maxx <- VaR(rte, p = 0.95, method = "gaussian") * 100
+  x <- seq(-4, maxx[1], length = 50)
+  y <- dnorm(x, 0, 1)
+  curve(dnorm(x, mean = 0, sd = 1), add = TRUE, lwd = 1, col = 1)
+  abline(v = maxx, col = 2, lty = 2)
+  polycurve(x, y, col = "grey")
+  text(VaR(rte, p = 0.95, method = "gaussian") * 100, 0.017, expression(paste("5%")), cex = 0.9)
+  text(VaR(rte, p = 0.95, method = "gaussian") * 100 + 0.3, 0.3, "VaR", col = 2)
+}
+
+plotPremierGraphique()
+```
+
+# VaR Cornish-Fisher
+
+Afin de tenir compte de l'asymétrie et des queues épaisses de la distibution des pertes et profits, on utilise la VaR normale modifiée appelée VaR de Cornish-Fisher :
+
+$$
+\text{MVaR}_q =  \text{E}[\Delta p_t] - z_{cf}\sigma_{\Delta p_t}
+$$
+avec 
+
+$$
+z_{cf} = z_c + \frac{((z_c^2-1)*s)}{6} +  \frac{((z_c^3-3*z_c)*k)}{24} +  \frac{((2*z_c^3-(5*z_c))*s^2)}{36}
+$$
+où $z_c = -\Phi^{-1}(q)$, $s$ le skewness et $k$ l'excès de kurtosis.
+
+```{r}
+VaRCF = VaR(rte, p=.95, method="modified")
+VaRCF
+```
+
+La VaR obtenue est $−0.006097899$, soit environ $0,61 \%$. Cela représente une estimation de la perte potentielle maximale, avec une probabilité de $95 \%$, en tenant compte de l’asymétrie et de l’aplatissement de la distribution (méthode Cornish-Fisher).
+
+En valeur, cela fait : 
+
+```{r}
+VaRCF * pt[1761]
+```
+
+Avec une probabilité de $95 \%$, la perte maximale anticipée pour une action Square Enix sur une journée est d’environ $0.29 \$$. Cela signifie que si vous détenez une seule action, vous ne devriez pas perdre plus de $0.29 \$$ le lendemain dans $95 \%$ des cas.
+
+# VaR Historique
+
+La **VaR historique** est une méthode d’estimation de la Value at Risk (VaR) qui s’appuie sur l’analyse des données passées des facteurs de risque, tels que les taux d’intérêt ou les taux de change. Contrairement à d’autres approches, elle ne repose sur aucune hypothèse concernant la distribution des facteurs de risque, se contentant d’exploiter directement les données historiques.
+
+L’un de ses principaux avantages est sa capacité à capturer les queues épaisses de la distribution si celles-ci sont présentes dans les données historiques. En outre, cette méthode prend en compte les corrélations entre les différents facteurs de risque, ce qui en fait un outil particulièrement efficace pour évaluer les risques financiers de manière réaliste.
+
+Le cours de notre action Square Enix est le facteur de risque dont on désire déterminer la VaR.
+
+Notons $X(0)$, la valeur observée aujourd’hui du risque et $X(1)$, la valeur future.
+
+La variable aléatoire $\Delta$ est définie comme : 
+$$\Delta(t) = \frac{X(t)- X(t-1)}{X(t-1)}, \quad t = -T+1, ..., -1,0$$
+La relation $X(1) - X(0) =\Delta \times X(0)$ nous permet d'obtenir la valeur future du risque $X$ par :
+
+$$
+X^{(t)}(1) = X(0) + \Delta(t) \times X(0), \quad t = -T+1, ..., -1,0
+$$
+et donc la distribution de la variation future de valeur par : 
+
+$$
+\Delta p^{(t)} = X^{(t)}(1) - X(0) = \Delta(t) \times X(0), \quad t = -T+1, ..., -1,0
+$$
+Enfin, les variations futures de la valeur sont d'abord classées par ordre croissant. Finalement, la VaR est déterminée en tant que le quantile de la distribution des variations futures.
+
+
+```{r}
+VaRSH = VaR(rte, p=.95, method="historical")
+VaRSH
+```
+
+La VaR obtenue est $−0.03370584$, ce qui correspond à une perte potentielle de $3,37 \%$ sur une journée, avec une probabilité de $95 \%$.
+
+En valeur, cela fait : 
+
+```{r}
+VaRSH * pt[1761]
+```
+
+Avec une probabilité de $95 \%$, la perte maximale anticipée pour une action Square Enix sur une journée est d’environ $1.59 \$$. Cela signifie que si vous détenez une seule action, vous ne devriez pas perdre plus de $1.59 \$$ le lendemain dans $95 \%$ des cas.
+
+# Backtesting
+
+## Les tests et leurs hypothèses
+
+### Test de Kupiec 
+
+$H0$ : $f = q$ Taux de violation empirique = taux de violation théorique
+
+$H_a$ : $f \neq q$ Écart significatif entre les deux taux
+
+où $f$ est le taux de violation (estimé par le taux de violation empirique, $\hat{f}$).
+
+Dans la littérature sur les modèles de la VaR, ce test est appelé test LR de Kupiec (1995) :
+
+$$
+LR = -2log\left(\frac{q^N (1-q)^{T-N}}{\hat{f}^N(1-\hat{f})^{T-N}}\right)
+$$ 
+
+avec $N$ le nombre de violations de la VaR, $T$ le nombre initial d’observations, $q$ le taux de violations théorique et $\hat{f}$ le taux de violation empirique estimé. Sous $H_0$ que $f$ est le vrai taux de violation, $LR \sim \chi^2(1)$. 
+
+Ce test n'est pas précis car il suppose la dépendance des violations.
+
+### Test de Christoffersen
+
+$H0$ : $f = q$ Taux de violation empirique = taux de violation théorique et indépendances des violations
+
+$H_a$ : $f \neq q$ Écart significatif entre les deux taux ou dépendance des violations
+
+## Résultats de notre Backtesting 
+
+```{r, echo=FALSE}
+# Créer une matrice avec les données des caractéristiques
+data <- matrix(c(
+  "60.6", "120", "0", "0",
+  "60", "59", "8.322923e-01", "9.749090e-01",
+  "60", "96", "1.587083e-05", "2.439239e-05",
+  "60", "63", "7.532442e-01", "8.756466e-01"
+), ncol = 4, byrow = TRUE)
+
+# Ajouter les noms des colonnes et des lignes
+colnames(data) <- c("Nombre de violations théorique", "Nombre de violations empirique", "P-value du test de Kupiec", "P-value du test de Christoffersen")
+rownames(data) <- c(
+  "VaR Paramétrique",
+  "VaR Normale",
+  "VaR de Cornish-Fisher",
+  "VaR Historique"
+)
+
+# Afficher le tableau avec kable pour un rendu propre
+kable(data, caption = "Tableau récapitulatif des résultats du Backtesting")
+```
+
+Parmi les données présentées ci-dessus, deux VaR sont correctement estimées :
+
+- **VaR Normale**
+- **VaR Historique**
+
+Cependant, si nous devions en choisir une seule, la **VaR Normale** serait à privilégier pour les raisons suivantes :
+
+- Son nombre de violations est le plus proche de la valeur théorique.
+
+- Elle satisfait pleinement les tests statistiques avec des résultats solides.
+
+- Elle est légèrement sur-évaluée, ce qui constitue une approche plus prudente et adaptée à la gestion des risques.
+
+```{r}
+nb_theo = 0.05 * length(rtt)
+nb_theo
+```
+
+### VaR conditionnelle
+
+```{r}
+report(roll,type="VaR",VaR.alpha=0.05,conf.level=0.95)
+```
+
+On obient un nombre de violations de $120$ (taux de $9.9 \%$) pour une valeur attendue de $60.6$ (taux de $5 \%$). Le nombre de violations est significativement supérieur à sa valeur théorique, notre VaR Conditionnelle est donc sous-évaluée. 
+
+La p-value du test de Kupiec est $0 < 5\%$ donc on rejete l’hypothèse nulle $(H0)$. La VaR n'est pas correctement estimée selon ce test.
+
+La p-value du test de Christoffersen est $0 < 5\%$ donc on rejete l’hypothèse nulle $(H0)$. La VaR n'est pas correctement estimée selon ce test.
+
+On en conclue que la VaR Conditionnelle n'est pas bien estimée.
+
+### VaR Normale, Cornish-Fisher et par simulation historique 
+
+```{r, echo=FALSE}
+backTestVaR <- function(x, p = alpha) {
+  normal.VaR = as.numeric(VaR(x, p=p, method="gaussian"))
+  historical.VaR = as.numeric(VaR(x, p=p, method="historical"))
+  modified.VaR = as.numeric(VaR(x, p=p, method="modified"))
+  ans = c(normal.VaR, modified.VaR, historical.VaR)
+  names(ans) = c("Normal", "CF", "HS")
+  return(ans)
+}
+
+alpha = 0.95
+Nte = length(rte)
+Ntt = length(rtt)
+rt_xts = xts(x=rt,order.by=dates)
+
+VaR.results = rollapply(as.zoo(rt_xts), width=Nte, 
+                        FUN = backTestVaR, p=alpha, by.column = FALSE,
+                        align = "right")
+
+chart.TimeSeries(merge(rt_xts, VaR.results),legend.loc="topright")
+```
+
+**• Données :**
+
+- **Série noire (barres) :** Ce sont les rendements réels (journaliers ou à une autre fréquence). Ils oscillent autour de 0, avec des pics positifs (gains importants) et négatifs (pertes importantes).
+
+- **Lignes de VaR :**
+
+  - **Rouge ("Normal") :** VaR basée sur une distribution normale des rendements, souvent utilisée comme référence théorique.
+
+  - **Vert ("Cornish-Fisher") :** VaR ajustée pour tenir compte de l'asymétrie (skewness) et de l'aplatissement (kurtosis) des rendements. C'est une extension de la méthode normale.
+
+  - **Bleu ("Historique") :** VaR calculée directement à partir de la distribution empirique des rendements passés, sans hypothèse de distribution.
+
+Les lignes représentent le seuil de perte maximal prévu à 95% de confiance (ou au niveau que vous avez défini).
+Si les rendements (barres noires) tombent en dessous d'une ligne de VaR, cela signifie une violation de la VaR pour cette méthode.
+
+**• Observations :**
+
+**La courbe de la VaR Normale (en rouge)** semble *plus haute* que les autres dans plusieurs régions du graphe. Une **VaR plus élevée** implique qu'elle est plus conservatrice, et donc moins sujette aux violations.
+
+**La courbe de Cornish-Fisher (en vert)** est souvent sous la VaR Normale et Historique, surtout lors des événements extrêmes (pics). Cela montre qu'elle sous-estime les pertes extrêmes. Par exemple, lors de mouvements brusques (pics négatifs), la courbe est trop "basse" et ne capture pas les rendements extrêmes.
+
+**La courbe Historique (en bleu)** est proche des rendements extrêmes, tout en restant au-dessus de ceux-ci pour la plupart des événements.
+
+Affichons maintenant le tableau des violations pour ces 3 VaR : 
+
+```{r, echo=FALSE}
+violations.mat = matrix(0, 3, 5)
+rownames(violations.mat) = c("Normal", "CF", "HS")
+colnames(violations.mat) = c("Théorique", "Empirique", "1-alpha", "Pourcentage", "Ratio Violations")
+
+violations.mat[, "Théorique"] = (1-alpha)*Ntt
+violations.mat[, "1-alpha"] = 1 - alpha
+
+
+for(i in colnames(VaR.results)) {
+  VaR.violations = as.numeric(as.zoo(rt_xts[index(VaR.results)])) < VaR.results[, i]
+  violations.mat[i, "Empirique"] = sum(VaR.violations)
+  violations.mat[i, "Pourcentage"] = sum(VaR.violations)/Ntt
+  violations.mat[i, "Ratio Violations"] = violations.mat[i, "Empirique"] / violations.mat[i,"Théorique"]
+}
+
+violations.mat
+```
+
+```{r, echo=FALSE}
+resultats<-data.frame(matrix(NA,ncol=4,nrow=3))
+colnames(resultats)<-c("Nombre de violations théorique","Nombre de violations empirique","Kupiecpv","Christoffersenpv")
+rownames(resultats)<-c("Normale","CF","HS")
+
+# normale
+VaR.test1 = VaRTest(1-alpha,actual=coredata(rt_xts[index(VaR.results)]), VaR=coredata(VaR.results[,"Normal"]))
+resultats[1,1]=VaR.test1$expected.exceed
+resultats[1,2]=VaR.test1$actual.exceed
+resultats[1,3]=VaR.test1$uc.LRp
+resultats[1,4]=VaR.test1$cc.LRp
+
+# modifie
+VaR.test3 = VaRTest(1-alpha, actual=coredata(rt_xts[index(VaR.results)]), VaR=coredata(VaR.results[,"CF"]))
+resultats[2,1]=VaR.test3$expected.exceed
+resultats[2,2]=VaR.test3$actual.exceed
+resultats[2,3]=VaR.test3$uc.LRp
+resultats[2,4]=VaR.test3$cc.LRp
+
+# historique
+VaR.test2 = VaRTest(1-alpha,actual=coredata(rt_xts[index(VaR.results)]), VaR=coredata(VaR.results[,"HS"]))
+resultats[3,1]=VaR.test2$expected.exceed
+resultats[3,2]=VaR.test2$actual.exceed
+resultats[3,3]=VaR.test2$uc.LRp
+resultats[3,4]=VaR.test2$cc.LRp
+
+resultats
+```
+
+#### VaR Normale
+
+On obtient un nombre de violations de $59$ pour une valeur attendue de $60$. Le nombre de violations quasi identique à sa valeur théorique, $59<60$ notre VaR Normale est donc très légèrement sur-évaluée, donc plutôt bien évaluée.
+
+La p-value du test de Kupiec est $8.322923e-01 > 0.05$ donc on accepte l’hypothèse nulle $(H0)$. La VaR est correctement estimée selon ce test, le nombre de violations observées correspond bien à la proportion théorique.
+
+La p-value du test de Christoffersen est $9.749090e-01 > 0.05$ donc on accepte l’hypothèse nulle $(H0)$. Les violations sont bien indépendantes et correctement réparties dans le temps.
+
+**On en conclue que la VaR Normale a bien été estimée.**
+
+#### VaR de Cornish-Fisher
+
+On obtient un nombre de violations de $96$ pour une valeur attendue de $60$. Le nombre de violations est significativement supérieur à sa valeur théorique, notre VaR de Cornish-Fisher est donc sous-évaluée. 
+
+La p-value du test de Kupiec est $1.587083e-05 < 0.05$ donc on rejette l’hypothèse nulle $(H0)$. La VaR n'est pas correctement estimée selon ce test, le nombre de violations empiriques diffère significativement de ce qui est attendu.
+
+La p-value du test de Christoffersen est $2.439239e-05 < 0.05$ donc on rejette l’hypothèse nulle $(H0)$. La VaR n'est pas correctement estimée selon ce test. Non seulement le nombre de violations est incorrect, mais elles présentent également des patterns temporels (violations non indépendantes).
+
+**On en conclue que la VaR de Cornish-Fisher n’a pas bien été estimée. Elle sous-estime les pertes extrêmes et est mal calibrée pour nos données.**
+
+#### VaR Historique
+
+On obtient un nombre de violations de $63$ pour une valeur attendue de $60$. Le nombre de violations est légèrement supérieur à sa valeur théorique, notre VaR Historique est donc sous-évaluée. 
+
+La p-value du test de Kupiec est $7.532442e-01 > 0.05$ donc on accpete l’hypothèse nulle $(H0)$. La VaR est correctement estimée selon ce test, le nombre de violations observées correspond bien à la proportion théorique.
+
+La p-value du test de Christoffersen est $8.756466e-01 > 0.05$ donc on accpete l’hypothèse nulle $(H0)$. Les violations sont bien indépendantes et correctement réparties dans le temps.
+
+**On en conclue que la VaR Historique a bien été estimée.**
